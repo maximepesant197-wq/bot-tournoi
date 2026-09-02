@@ -68,6 +68,8 @@ interface PendingRegistrationFlow {
   format: Format;
   teamId?: string;
   playerIds?: string[];
+  squads?: string[][];
+  benchIds?: string[];
   captainId?: string;
 }
 
@@ -180,6 +182,15 @@ export class PanelController {
       case "registration-confirm":
         await this.confirmRegistration(interaction);
         return;
+      case "registration-squad-add":
+        await this.showAdditionalSquadPicker(interaction);
+        return;
+      case "registration-squad-finish":
+        await this.showBenchPicker(interaction);
+        return;
+      case "registration-no-bench":
+        await this.showRegistrationCaptainPicker(interaction);
+        return;
       case "staff-registrations":
         await this.replyRegistrations(interaction);
         return;
@@ -279,6 +290,12 @@ export class PanelController {
         return;
       case "registration-members":
         await this.selectRegistrationMembers(interaction);
+        return;
+      case "registration-squad-members":
+        await this.selectAdditionalSquadMembers(interaction);
+        return;
+      case "registration-bench-members":
+        await this.selectBenchMembers(interaction);
         return;
       case "staff-registration-format":
         await this.publishRegistrationPanel(interaction, formatFromValue(interaction.values[0] ?? ""));
@@ -601,38 +618,132 @@ export class PanelController {
   private async selectRegistrationTeam(interaction: StringSelectMenuInteraction): Promise<void> {
     const pending = this.pendingRegistrations.get(flowKey(interaction.guildId ?? "", interaction.user.id));
     const teamId = interaction.values[0];
-    const team = interaction.guild ? this.store.getGuild(interaction.guild.id).teams[teamId] : undefined;
-    if (!pending || !team || team.captainId !== interaction.user.id) return safeReply(interaction, { content: "Sélection expirée ou team non autorisée.", ephemeral: true });
+    const guild = interaction.guild;
+    const team = guild ? this.store.getGuild(guild.id).teams[teamId] : undefined;
+    if (!pending || !guild || !team || team.captainId !== interaction.user.id) return safeReply(interaction, { content: "Sélection expirée ou team non autorisée.", ephemeral: true });
     pending.teamId = teamId;
-    const members = await Promise.all(team.memberIds.map(async (memberId) => interaction.guild?.members.fetch(memberId).catch(() => undefined)));
-    const options = members
+    const options = await this.registrationMemberOptions(guild, team.memberIds);
+    if (options.length < pending.format) return safeReply(interaction, { content: `Cette team doit avoir au moins ${pending.format} membres disponibles pour créer une squad ${FORMAT_LABELS[pending.format]}.`, ephemeral: true });
+    await interaction.reply({ content: `Crée la Squad 1 en sélectionnant exactement ${pending.format} joueurs de ta team.`, components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId("registration-members").setPlaceholder(`Joueurs de la Squad 1 (${FORMAT_LABELS[pending.format]})`).setMinValues(pending.format).setMaxValues(pending.format).addOptions(options))], ephemeral: true });
+  }
+
+  private async registrationMemberOptions(guild: Guild, memberIds: string[]) {
+    const members = await Promise.all(memberIds.map((memberId) => guild.members.fetch(memberId).catch(() => undefined)));
+    return members
       .filter((member): member is NonNullable<typeof member> => Boolean(member))
       .slice(0, 25)
       .map((member) => ({ label: member.displayName.slice(0, 100), value: member.id, description: "Membre de ta team" }));
-    if (!options.length) return safeReply(interaction, { content: "Aucun membre Discord de cette team n’est disponible.", ephemeral: true });
-    await interaction.reply({ content: "Sélectionne les joueurs inscrits parmi les membres de ta team. Les squads seront réparties automatiquement par format.", components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId("registration-members").setPlaceholder("Membres de ta team").setMinValues(1).setMaxValues(Math.min(25, options.length)).addOptions(options))], ephemeral: true });
   }
 
   private async selectRegistrationMembers(interaction: UserSelectMenuInteraction | StringSelectMenuInteraction): Promise<void> {
     const pending = this.pendingRegistrations.get(flowKey(interaction.guildId ?? "", interaction.user.id));
     const team = pending?.teamId && interaction.guild ? this.store.getGuild(interaction.guild.id).teams[pending.teamId] : undefined;
-    if (!pending || !team || interaction.values.some((id) => !team.memberIds.includes(id))) return safeReply(interaction, { content: "Tous les joueurs doivent être membres de la team.", ephemeral: true });
-    pending.playerIds = [...new Set(interaction.values)];
-    const options = await Promise.all(pending.playerIds.map(async (playerId) => {
-      const member = interaction.guild ? await interaction.guild.members.fetch(playerId).catch(() => undefined) : undefined;
-      return { label: member?.displayName?.slice(0, 100) ?? `Joueur ${playerId}`, value: playerId };
-    }));
-    await interaction.reply({ content: "Sélectionne le capitaine de l’inscription.", components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId("registration-captain").setPlaceholder("Capitaine").addOptions(options))], ephemeral: true });
+    const selected = [...new Set(interaction.values)];
+    if (!pending || !team || selected.length !== pending.format || selected.some((id) => !team.memberIds.includes(id))) {
+      return safeReply(interaction, { content: `Une squad doit contenir exactement ${pending?.format ?? "le nombre prévu"} joueurs de cette team.`, ephemeral: true });
+    }
+    pending.squads = [selected];
+    pending.playerIds = selected;
+    pending.benchIds = [];
+    await this.replySquadBuilder(interaction, pending, team);
+  }
+
+  private async selectAdditionalSquadMembers(interaction: StringSelectMenuInteraction): Promise<void> {
+    const pending = this.pendingRegistrations.get(flowKey(interaction.guildId ?? "", interaction.user.id));
+    const team = pending?.teamId && interaction.guild ? this.store.getGuild(interaction.guild.id).teams[pending.teamId] : undefined;
+    const selected = [...new Set(interaction.values)];
+    const used = new Set(pending?.squads?.flat() ?? []);
+    if (!pending || !team || selected.length !== pending.format || selected.some((id) => !team.memberIds.includes(id) || used.has(id))) {
+      return safeReply(interaction, { content: `Cette squad doit contenir exactement ${pending?.format ?? "le nombre prévu"} nouveaux joueurs de ta team.`, ephemeral: true });
+    }
+    pending.squads = [...(pending.squads ?? []), selected];
+    pending.playerIds = pending.squads.flat();
+    await this.replySquadBuilder(interaction, pending, team);
+  }
+
+  private async showAdditionalSquadPicker(interaction: ButtonInteraction): Promise<void> {
+    if (!interaction.guild) return safeReply(interaction, { content: "Serveur introuvable.", ephemeral: true });
+    const pending = this.pendingRegistrations.get(flowKey(interaction.guild.id, interaction.user.id));
+    const team = pending?.teamId ? this.store.getGuild(interaction.guild.id).teams[pending.teamId] : undefined;
+    if (!pending || !team || !pending.squads?.length) return safeReply(interaction, { content: "Inscription expirée, recommence.", ephemeral: true });
+    const used = new Set(pending.squads.flat());
+    const options = await this.registrationMemberOptions(interaction.guild, team.memberIds.filter((id) => !used.has(id)));
+    if (options.length < pending.format) return safeReply(interaction, { content: "Il n’y a pas assez de nouveaux joueurs disponibles pour créer une squad complète.", ephemeral: true });
+    await safeReply(interaction, {
+      content: `Sélectionne exactement ${pending.format} joueurs pour la Squad ${(pending.squads.length + 1)}.`,
+      components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId("registration-squad-members").setPlaceholder(`Joueurs de la Squad ${pending.squads.length + 1}`).setMinValues(pending.format).setMaxValues(pending.format).addOptions(options))],
+      ephemeral: true,
+    });
+  }
+
+  private async replySquadBuilder(interaction: UserSelectMenuInteraction | StringSelectMenuInteraction, pending: PendingRegistrationFlow, team: Team): Promise<void> {
+    const squads = pending.squads ?? [];
+    await safeReply(interaction, {
+      content: registrationSquadBuilderSummary(team, pending.format, squads),
+      components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+        button("registration-squad-add", "➕ Ajouter une squad", ButtonStyle.Primary),
+        button("registration-squad-finish", "✅ Finir les squads", ButtonStyle.Success),
+      )],
+      ephemeral: true,
+    });
+  }
+
+  private async showBenchPicker(interaction: ButtonInteraction): Promise<void> {
+    if (!interaction.guild) return safeReply(interaction, { content: "Serveur introuvable.", ephemeral: true });
+    const pending = this.pendingRegistrations.get(flowKey(interaction.guild.id, interaction.user.id));
+    const team = pending?.teamId ? this.store.getGuild(interaction.guild.id).teams[pending.teamId] : undefined;
+    if (!pending || !team || !pending.squads?.length) return safeReply(interaction, { content: "Inscription expirée, recommence.", ephemeral: true });
+    const activeIds = new Set(pending.squads.flat());
+    const options = await this.registrationMemberOptions(interaction.guild, team.memberIds.filter((id) => !activeIds.has(id)));
+    if (!options.length) {
+      pending.benchIds = [];
+      return this.showRegistrationCaptainPicker(interaction);
+    }
+    await safeReply(interaction, {
+      content: "Sélectionne les remplaçants parmi les membres restants, ou passe cette étape.",
+      components: [
+        new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId("registration-bench-members").setPlaceholder("Choisir les remplaçants").setMinValues(1).setMaxValues(options.length).addOptions(options)),
+        new ActionRowBuilder<ButtonBuilder>().addComponents(button("registration-no-bench", "Aucun remplaçant", ButtonStyle.Secondary)),
+      ],
+      ephemeral: true,
+    });
+  }
+
+  private async selectBenchMembers(interaction: StringSelectMenuInteraction): Promise<void> {
+    const pending = this.pendingRegistrations.get(flowKey(interaction.guildId ?? "", interaction.user.id));
+    const team = pending?.teamId && interaction.guild ? this.store.getGuild(interaction.guild.id).teams[pending.teamId] : undefined;
+    const activeIds = new Set(pending?.squads?.flat() ?? []);
+    if (!pending || !team || interaction.values.some((id) => !team.memberIds.includes(id) || activeIds.has(id))) {
+      return safeReply(interaction, { content: "Les remplaçants doivent être des membres non titulaires de cette team.", ephemeral: true });
+    }
+    pending.benchIds = [...new Set(interaction.values)];
+    pending.playerIds = [...activeIds, ...pending.benchIds];
+    await this.showRegistrationCaptainPicker(interaction);
+  }
+
+  private async showRegistrationCaptainPicker(interaction: ButtonInteraction | StringSelectMenuInteraction): Promise<void> {
+    if (!interaction.guild) return safeReply(interaction, { content: "Serveur introuvable.", ephemeral: true });
+    const pending = this.pendingRegistrations.get(flowKey(interaction.guild.id, interaction.user.id));
+    const activeIds = pending?.squads?.flat() ?? [];
+    if (!pending || !activeIds.length) return safeReply(interaction, { content: "Inscription expirée, recommence.", ephemeral: true });
+    pending.playerIds = [...activeIds, ...(pending.benchIds ?? [])];
+    const options = await this.registrationMemberOptions(interaction.guild, activeIds);
+    await safeReply(interaction, {
+      content: "Sélectionne le capitaine de l’inscription parmi les joueurs titulaires.",
+      components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId("registration-captain").setPlaceholder("Capitaine").setMinValues(1).setMaxValues(1).addOptions(options))],
+      ephemeral: true,
+    });
   }
 
   private async selectRegistrationCaptain(interaction: StringSelectMenuInteraction): Promise<void> {
     const pending = this.pendingRegistrations.get(flowKey(interaction.guildId ?? "", interaction.user.id));
     const captainId = interaction.values[0];
-    if (!pending || !pending.teamId || !pending.playerIds?.includes(captainId)) return safeReply(interaction, { content: "Inscription expirée.", ephemeral: true });
+    const activeIds = pending?.squads?.flat() ?? [];
+    if (!pending || !pending.teamId || !activeIds.includes(captainId)) return safeReply(interaction, { content: "Le capitaine doit être un joueur titulaire de l’inscription.", ephemeral: true });
     pending.captainId = captainId;
     const format = pending.format;
-    const squads = chunk(pending.playerIds, format).filter((squad) => squad.length === format);
-    const bench = pending.playerIds.slice(squads.length * format);
+    const squads = pending.squads ?? [];
+    const bench = pending.benchIds ?? [];
     const team = interaction.guild ? this.store.getGuild(interaction.guild.id).teams[pending.teamId] : undefined;
     if (!team) return safeReply(interaction, { content: "Team introuvable, recommence l’inscription.", ephemeral: true });
     await interaction.reply({ content: registrationSummary(format, team, captainId, squads, bench), components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button("registration-confirm", "✅ Confirmer l’inscription", ButtonStyle.Success), button("staff-cancel", "Annuler", ButtonStyle.Secondary))], ephemeral: true });
@@ -642,12 +753,19 @@ export class PanelController {
     if (!interaction.guild) return safeReply(interaction, { content: "Serveur introuvable.", ephemeral: true });
     const key = flowKey(interaction.guild.id, interaction.user.id);
     const pending = this.pendingRegistrations.get(key);
-    if (!pending?.teamId || !pending.captainId || !pending.playerIds) return safeReply(interaction, { content: "Inscription expirée.", ephemeral: true });
+    if (!pending?.teamId || !pending.captainId || !pending.squads?.length) return safeReply(interaction, { content: "Inscription expirée.", ephemeral: true });
     const team = this.store.getGuild(interaction.guild.id).teams[pending.teamId];
     if (!team || team.captainId !== interaction.user.id) return safeReply(interaction, { content: "Seul le capitaine peut confirmer.", ephemeral: true });
     if (this.store.getGuild(interaction.guild.id).status === "live" || this.store.getGuild(interaction.guild.id).status === "finished") return safeReply(interaction, { content: "Le tournoi ne prend plus d’inscriptions.", ephemeral: true });
-    const squads = chunk(pending.playerIds, pending.format).filter((squad) => squad.length === pending.format);
-    const registration: Registration = { id: pending.teamId, teamId: pending.teamId, format: pending.format, captainId: pending.captainId, playerIds: pending.playerIds, squads, benchIds: pending.playerIds.slice(squads.length * pending.format), checkIn: Object.fromEntries(pending.playerIds.map((id) => [id, false])), status: "registered", createdAt: new Date().toISOString() };
+    const squads = pending.squads;
+    const bench = [...new Set(pending.benchIds ?? [])];
+    const activePlayers = squads.flat();
+    const playerIds = [...new Set([...activePlayers, ...bench])];
+    const activeSet = new Set(activePlayers);
+    if (squads.some((squad) => squad.length !== pending.format) || activePlayers.length !== new Set(activePlayers).size || bench.some((id) => activeSet.has(id)) || playerIds.some((id) => !team.memberIds.includes(id)) || !activeSet.has(pending.captainId)) {
+      return safeReply(interaction, { content: "Les squads ou les remplaçants ne sont pas valides. Recommence l’inscription.", ephemeral: true });
+    }
+    const registration: Registration = { id: pending.teamId, teamId: pending.teamId, format: pending.format, captainId: pending.captainId, playerIds, squads, benchIds: bench, checkIn: Object.fromEntries(playerIds.map((id) => [id, false])), status: "registered", createdAt: new Date().toISOString() };
     await this.store.mutateGuild(interaction.guild.id, (guild) => { guild.registrations[registration.id] = registration; });
     this.pendingRegistrations.delete(key);
     await safeReply(interaction, { content: `Inscription confirmée pour **${team.name}** [${team.tag}] en ${FORMAT_LABELS[pending.format]}.`, components: [] });
@@ -993,6 +1111,10 @@ function chunk<T>(values: T[], size: number): T[][] {
 
 function registrationSummary(format: Format, team: Team, captainId: string, squads: string[][], bench: string[]): string {
   return `Récapitulatif — team **${team.name}** [${team.tag}], format **${FORMAT_LABELS[format]}**, capitaine <@${captainId}>.\n${squads.map((squad, index) => `Squad ${index + 1} : ${squad.map((id) => `<@${id}>`).join(", ")}`).join("\n")}\n${bench.length ? `Remplaçants : ${bench.map((id) => `<@${id}>`).join(", ")}` : "Aucun remplaçant."}`;
+}
+
+function registrationSquadBuilderSummary(team: Team, format: Format, squads: string[][]): string {
+  return `Team **${team.name}** [${team.tag}] — format **${FORMAT_LABELS[format]}**\n${squads.map((squad, index) => `✅ Squad ${index + 1} : ${squad.map((id) => `<@${id}>`).join(", ")}`).join("\n")}\n\nTu peux ajouter une autre squad complète ou terminer pour choisir les remplaçants.`;
 }
 
 function teamLabel(state: GuildTournamentState, teamId: string | undefined): string {
