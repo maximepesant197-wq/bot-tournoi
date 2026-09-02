@@ -618,7 +618,10 @@ export class PanelController {
     const team = pending?.teamId && interaction.guild ? this.store.getGuild(interaction.guild.id).teams[pending.teamId] : undefined;
     if (!pending || !team || interaction.values.some((id) => !team.memberIds.includes(id))) return safeReply(interaction, { content: "Tous les joueurs doivent être membres de la team.", ephemeral: true });
     pending.playerIds = [...new Set(interaction.values)];
-    const options = pending.playerIds.map((playerId) => ({ label: `Joueur ${playerId}`, value: playerId }));
+    const options = await Promise.all(pending.playerIds.map(async (playerId) => {
+      const member = interaction.guild ? await interaction.guild.members.fetch(playerId).catch(() => undefined) : undefined;
+      return { label: member?.displayName?.slice(0, 100) ?? `Joueur ${playerId}`, value: playerId };
+    }));
     await interaction.reply({ content: "Sélectionne le capitaine de l’inscription.", components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId("registration-captain").setPlaceholder("Capitaine").addOptions(options))], ephemeral: true });
   }
 
@@ -630,7 +633,9 @@ export class PanelController {
     const format = pending.format;
     const squads = chunk(pending.playerIds, format).filter((squad) => squad.length === format);
     const bench = pending.playerIds.slice(squads.length * format);
-    await interaction.reply({ content: registrationSummary(format, pending.teamId, captainId, squads, bench), components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button("registration-confirm", "✅ Confirmer l’inscription", ButtonStyle.Success), button("staff-cancel", "Annuler", ButtonStyle.Secondary))], ephemeral: true });
+    const team = interaction.guild ? this.store.getGuild(interaction.guild.id).teams[pending.teamId] : undefined;
+    if (!team) return safeReply(interaction, { content: "Team introuvable, recommence l’inscription.", ephemeral: true });
+    await interaction.reply({ content: registrationSummary(format, team, captainId, squads, bench), components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button("registration-confirm", "✅ Confirmer l’inscription", ButtonStyle.Success), button("staff-cancel", "Annuler", ButtonStyle.Secondary))], ephemeral: true });
   }
 
   private async confirmRegistration(interaction: ButtonInteraction): Promise<void> {
@@ -983,8 +988,8 @@ function chunk<T>(values: T[], size: number): T[][] {
   return result;
 }
 
-function registrationSummary(format: Format, teamId: string, captainId: string, squads: string[][], bench: string[]): string {
-  return `Récapitulatif — team \`${teamId}\`, format **${FORMAT_LABELS[format]}**, capitaine <@${captainId}>.\n${squads.map((squad, index) => `Squad ${index + 1} : ${squad.map((id) => `<@${id}>`).join(", ")}`).join("\n")}\n${bench.length ? `Remplaçants : ${bench.map((id) => `<@${id}>`).join(", ")}` : "Aucun remplaçant."}`;
+function registrationSummary(format: Format, team: Team, captainId: string, squads: string[][], bench: string[]): string {
+  return `Récapitulatif — team **${team.name}** [${team.tag}], format **${FORMAT_LABELS[format]}**, capitaine <@${captainId}>.\n${squads.map((squad, index) => `Squad ${index + 1} : ${squad.map((id) => `<@${id}>`).join(", ")}`).join("\n")}\n${bench.length ? `Remplaçants : ${bench.map((id) => `<@${id}>`).join(", ")}` : "Aucun remplaçant."}`;
 }
 
 function teamLabel(state: GuildTournamentState, teamId: string | undefined): string {
