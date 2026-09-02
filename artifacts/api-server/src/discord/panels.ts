@@ -142,7 +142,7 @@ export class PanelController {
   }
 
   public async handleButton(interaction: ButtonInteraction): Promise<void> {
-    const [action, id] = interaction.customId.split(":");
+    const [action, id, contextId] = interaction.customId.split(":");
     switch (action) {
       case "team-create":
         await interaction.showModal(teamCreationModal());
@@ -273,10 +273,10 @@ export class PanelController {
         await this.replyMyMatch(interaction);
         return;
       case "score-confirm":
-        await this.confirmProposedScore(interaction, id);
+        await this.confirmProposedScore(interaction, id, contextId);
         return;
       case "score-dispute":
-        await this.openDispute(interaction, id);
+        await this.openDispute(interaction, id, contextId);
         return;
       case "dispute-call":
         await this.callArbiter(interaction, id);
@@ -1171,29 +1171,33 @@ export class PanelController {
     await safeReply(interaction, { content: "Score envoyé au capitaine adverse pour confirmation.", ephemeral: true });
   }
 
-  private async confirmProposedScore(interaction: ButtonInteraction, matchId: string | undefined): Promise<void> {
-    if (!interaction.guild || !matchId) return safeReply(interaction, { content: "Match invalide.", ephemeral: true });
+  private async confirmProposedScore(interaction: ButtonInteraction, matchId: string | undefined, guildIdFromButton?: string): Promise<void> {
+    const guildId = interaction.guild?.id ?? guildIdFromButton ?? (matchId ? this.store.findGuildIdByMatch(matchId) : undefined);
+    if (!matchId || !guildId) return safeReply(interaction, { content: "Match invalide.", ephemeral: true });
     let result: { ok: boolean; error?: string } = { ok: false };
-    await this.store.mutateGuild(interaction.guild.id, (guild) => { const match = guild.matches[matchId]; if (match && isCaptainOfMatch(guild, match, interaction.user.id)) result = confirmScore(guild, match, interaction.user.id); else result = { ok: false, error: "Seul le capitaine adverse peut confirmer." }; });
+    await this.store.mutateGuild(guildId, (guild) => { const match = guild.matches[matchId]; if (match && isCaptainOfMatch(guild, match, interaction.user.id)) result = confirmScore(guild, match, interaction.user.id); else result = { ok: false, error: "Seul le capitaine adverse peut confirmer." }; });
     if (!result.ok) return safeReply(interaction, { content: result.error ?? "Confirmation refusée.", ephemeral: true });
-    const guild = this.store.getGuild(interaction.guild.id);
-    if (isTournamentComplete(guild)) await this.store.mutateGuild(interaction.guild.id, (current) => { current.status = "finished"; current.finalRanking = calculateRanking(current); current.winnerId = current.finalRanking[0]; });
+    const guild = this.store.getGuild(guildId);
+    if (isTournamentComplete(guild)) await this.store.mutateGuild(guildId, (current) => { current.status = "finished"; current.finalRanking = calculateRanking(current); current.winnerId = current.finalRanking[0]; });
     await safeReply(interaction, { content: `✅ Score officiel. ${guild.status === "live" ? "Le bracket est mis à jour." : "Le tournoi est terminé."}`, ephemeral: true });
   }
 
-  private async openDispute(interaction: ButtonInteraction, matchId: string | undefined): Promise<void> {
-    if (!interaction.guild || !matchId) return safeReply(interaction, { content: "Match invalide.", ephemeral: true });
-    const state = this.store.getGuild(interaction.guild.id);
+  private async openDispute(interaction: ButtonInteraction, matchId: string | undefined, guildIdFromButton?: string): Promise<void> {
+    const guildId = interaction.guild?.id ?? guildIdFromButton ?? (matchId ? this.store.findGuildIdByMatch(matchId) : undefined);
+    if (!matchId || !guildId) return safeReply(interaction, { content: "Match invalide.", ephemeral: true });
+    const state = this.store.getGuild(guildId);
     const match = state.matches[matchId];
     if (!match || match.status !== "awaiting-confirmation" || !isCaptainOfMatch(state, match, interaction.user.id) || match.proposedBy === interaction.user.id) return safeReply(interaction, { content: "Seul le capitaine adverse peut ouvrir ce litige.", ephemeral: true });
-    const dispute: Dispute = { id: `dispute-${matchId}-${Date.now()}`, matchId, guildId: interaction.guild.id, openedBy: interaction.user.id, proposedScoreA: match.scoreA ?? 0, proposedScoreB: match.scoreB ?? 0, status: "open", createdAt: new Date().toISOString() };
-    await this.store.mutateGuild(interaction.guild.id, (guild) => { guild.disputes[dispute.id] = dispute; guild.matches[matchId].status = "disputed"; });
-    const channel = interaction.guild.channels.cache.get(state.teams[match.teamAId ?? ""]?.baseChannelIds.tournament) as TextChannel | undefined;
+    const discordGuild = interaction.guild ?? await this.client.guilds.fetch(guildId).catch(() => undefined);
+    if (!discordGuild) return safeReply(interaction, { content: "Serveur du tournoi introuvable.", ephemeral: true });
+    const dispute: Dispute = { id: `dispute-${matchId}-${Date.now()}`, matchId, guildId, openedBy: interaction.user.id, proposedScoreA: match.scoreA ?? 0, proposedScoreB: match.scoreB ?? 0, status: "open", createdAt: new Date().toISOString() };
+    await this.store.mutateGuild(guildId, (guild) => { guild.disputes[dispute.id] = dispute; guild.matches[matchId].status = "disputed"; });
+    const channel = discordGuild.channels.cache.get(state.teams[match.teamAId ?? ""]?.baseChannelIds.tournament) as TextChannel | undefined;
     if (!channel) return safeReply(interaction, { content: "Litige enregistré, mais le salon tournoi est introuvable.", ephemeral: true });
     const thread = await channel.threads.create({ name: `⚖️ litige-${matchId}`, type: ChannelType.PrivateThread, autoArchiveDuration: 10080, invitable: false, reason: "Litige de score tournoi" });
-    await addAuthorizedMembers(thread, interaction.guild, this.config);
+    await addAuthorizedMembers(thread, discordGuild, this.config);
     await thread.send({ content: "⚖️ Litige réservé au Staff/Arbitres.", embeds: [new EmbedBuilder().setTitle("Litige de score").setDescription(`${matchText(state, match)}\nScore proposé : ${dispute.proposedScoreA} – ${dispute.proposedScoreB}\nOuvert par <@${interaction.user.id}>`).setColor(0xf59e0b)], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button(`dispute-call:${dispute.id}`, "📞 Appeler un arbitre", ButtonStyle.Primary), button(`dispute-resolve:${dispute.id}`, "Valider/modifier", ButtonStyle.Success))] });
-    await this.store.mutateGuild(interaction.guild.id, (guild) => { guild.disputes[dispute.id].threadId = thread.id; });
+    await this.store.mutateGuild(guildId, (guild) => { guild.disputes[dispute.id].threadId = thread.id; });
     await safeReply(interaction, { content: "⚖️ Litige ouvert dans une procédure privée Staff/Arbitres.", ephemeral: true });
   }
 
@@ -1233,7 +1237,7 @@ export class PanelController {
   private async sendScoreConfirmation(guild: Guild, state: GuildTournamentState, match: Match): Promise<void> {
     const opponentId = match.teamAId && captainOf(state, match.teamAId) === match.proposedBy ? captainOf(state, match.teamBId) : captainOf(state, match.teamAId);
     if (!opponentId) return;
-    const payload = { content: "⚠️ SCORE À CONFIRMER", embeds: [new EmbedBuilder().setTitle("Score à confirmer").setDescription(`${teamLabel(state, match.teamAId)} ${match.scoreA} / ${teamLabel(state, match.teamBId)} ${match.scoreB}`).setColor(0xf59e0b)], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button(`score-confirm:${match.id}`, "✅ Confirmer le score", ButtonStyle.Success), button(`score-dispute:${match.id}`, "❌ Signaler un problème", ButtonStyle.Danger))] };
+    const payload = { content: "⚠️ SCORE À CONFIRMER", embeds: [new EmbedBuilder().setTitle("Score à confirmer").setDescription(`${teamLabel(state, match.teamAId)} ${match.scoreA} / ${teamLabel(state, match.teamBId)} ${match.scoreB}`).setColor(0xf59e0b)], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button(`score-confirm:${state.guildId}:${match.id}`, "✅ Confirmer le score", ButtonStyle.Success), button(`score-dispute:${state.guildId}:${match.id}`, "❌ Signaler un problème", ButtonStyle.Danger))] };
     const member = await guild.members.fetch(opponentId).catch(() => undefined);
     if (member) await member.send(payload).catch(async () => {
       const team = Object.values(state.teams).find((candidate) => candidate.captainId === opponentId);
@@ -1375,15 +1379,16 @@ function isCaptainOfMatch(state: GuildTournamentState, match: Match, userId: str
 }
 
 async function safeReply(interaction: ReplyableInteraction, payload: InteractionReplyOptions): Promise<void> {
+  const response = interaction.inGuild() ? payload : { ...payload, ephemeral: false };
   if (interaction.isRepliable() && interaction.replied) {
-    await interaction.followUp(payload).catch(() => undefined);
+    await interaction.followUp(response).catch(() => undefined);
   } else if (interaction.isRepliable() && interaction.deferred) {
     await interaction.editReply({
-      content: payload.content,
-      embeds: payload.embeds,
-      components: payload.components,
+      content: response.content,
+      embeds: response.embeds,
+      components: response.components,
     }).catch(() => undefined);
   } else if (interaction.isRepliable()) {
-    await interaction.reply(payload).catch(() => undefined);
+    await interaction.reply(response).catch(() => undefined);
   }
 }

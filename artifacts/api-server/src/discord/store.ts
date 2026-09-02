@@ -60,6 +60,10 @@ export class TournamentStore {
     return created;
   }
 
+  public findGuildIdByMatch(matchId: string): string | undefined {
+    return Object.values(this.state.guilds).find((guild) => Boolean(guild.matches[matchId]))?.guildId;
+  }
+
   public async mutateGuild<T>(
     guildId: string,
     mutation: (guild: GuildTournamentState) => Promise<T> | T,
