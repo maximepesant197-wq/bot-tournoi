@@ -12,6 +12,7 @@ export type MatchStatus =
   | "awaiting-confirmation"
   | "completed"
   | "disputed";
+export type BracketLane = "winners" | "losers" | "grand-final";
 
 export interface Team {
   id: string;
@@ -47,6 +48,7 @@ export interface Registration {
 
 export interface Match {
   id: string;
+  bracket?: BracketLane;
   round: number;
   position: number;
   teamAId?: string;
@@ -58,6 +60,7 @@ export interface Match {
   winnerId?: string;
   status: MatchStatus;
   nextMatchId?: string;
+  loserNextMatchId?: string;
 }
 
 export interface Dispute {

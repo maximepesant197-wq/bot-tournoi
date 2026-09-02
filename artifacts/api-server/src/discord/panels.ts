@@ -989,12 +989,24 @@ function guildTeamName(state: GuildTournamentState, teamId: string): string {
 
 function matchText(state: GuildTournamentState, match: Match): string {
   const scores = match.scoreA !== undefined ? ` — ${match.scoreA}/${match.scoreB}` : "";
-  return `R${match.round}.${match.position + 1} : ${teamLabel(state, match.teamAId)} vs ${teamLabel(state, match.teamBId)}${scores} (${match.status})`;
+  const lane = match.bracket === "losers" ? "Perdants" : match.bracket === "grand-final" ? "Grande finale" : "Gagnants";
+  return `${lane} R${match.round}.${match.position + 1} : ${teamLabel(state, match.teamAId)} vs ${teamLabel(state, match.teamBId)}${scores} (${match.status})`;
 }
 
 function bracketText(state: GuildTournamentState): string {
   const matches = Object.values(state.matches).sort((a, b) => a.round - b.round || a.position - b.position);
-  return `**Bracket — statut ${state.status}**\n${matches.length ? matches.map((match) => matchText(state, match)).join("\n") : "Aucun bracket généré."}`;
+  if (!matches.length) return `**Bracket double élimination — statut ${state.status}**\nAucun bracket généré.`;
+  const sections: string[] = [];
+  for (const section of [
+    { title: "🟦 BRACKET DES GAGNANTS", matches: matches.filter((match) => (match.bracket ?? "winners") === "winners") },
+    { title: "🟥 BRACKET DES PERDANTS", matches: matches.filter((match) => match.bracket === "losers") },
+    { title: "🏆 GRANDE FINALE", matches: matches.filter((match) => match.bracket === "grand-final") },
+  ]) {
+    if (section.matches.length > 0) {
+      sections.push(`**${section.title}**\n${section.matches.map((match) => matchText(state, match)).join("\n")}`);
+    }
+  }
+  return `**Bracket double élimination — statut ${state.status}**\n\n${sections.join("\n\n")}`;
 }
 
 function captainOf(state: GuildTournamentState, teamId: string | undefined): string | undefined {
