@@ -183,6 +183,12 @@ export class PanelController {
       case "staff-registrations":
         await this.replyRegistrations(interaction);
         return;
+      case "staff-publish-registration":
+        await this.sendStaffRegistrationFormatPicker(interaction);
+        return;
+      case "staff-format":
+        await this.publishRegistrationPanel(interaction, formatFromValue(id ?? ""));
+        return;
       case "staff-start-checkin":
         await this.startCheckIn(interaction);
         return;
@@ -270,6 +276,9 @@ export class PanelController {
         return;
       case "registration-captain":
         await this.selectRegistrationCaptain(interaction);
+        return;
+      case "staff-registration-format":
+        await this.publishRegistrationPanel(interaction, formatFromValue(interaction.values[0] ?? ""));
         return;
       case "score-match":
         await this.selectScoreMatch(interaction);
@@ -680,6 +689,56 @@ export class PanelController {
     await safeReply(interaction, { content: lines.join("\n\n") || "Aucune inscription.", ephemeral: true });
   }
 
+  private async sendStaffRegistrationFormatPicker(interaction: ButtonInteraction): Promise<void> {
+    if (!interaction.guild || !isStaff(interaction, this.config)) return safeReply(interaction, { content: "Permission Staff requise.", ephemeral: true });
+    await safeReply(interaction, {
+      content: "Choisis le format du salon d’inscription à publier. Les autres panels restent inchangés.",
+      components: [
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          button("staff-format:4", "4️⃣ Publier 4v4", ButtonStyle.Primary),
+          button("staff-format:5", "5️⃣ Publier 5v5", ButtonStyle.Primary),
+          button("staff-format:6", "6️⃣ Publier 6v6", ButtonStyle.Primary),
+        ),
+      ],
+      ephemeral: true,
+    });
+  }
+
+  private async publishRegistrationPanel(
+    interaction: ButtonInteraction | StringSelectMenuInteraction,
+    format: Format | null,
+  ): Promise<void> {
+    if (!interaction.guild || !isStaff(interaction, this.config) || !format) {
+      return safeReply(interaction, { content: "Format invalide ou permission Staff requise.", ephemeral: true });
+    }
+
+    const channelName = registrationChannelName(format);
+    let channel = interaction.guild.channels.cache.find(
+      (candidate) => candidate.type === ChannelType.GuildText && candidate.name === channelName,
+    ) as TextChannel | undefined;
+
+    if (!channel) {
+      channel = await interaction.guild.channels.create({
+        name: channelName,
+        type: ChannelType.GuildText,
+        reason: `Publication du panel d’inscription ${FORMAT_LABELS[format]}`,
+      }).catch(() => undefined);
+    }
+
+    if (!channel) {
+      return safeReply(interaction, { content: "Impossible de créer le salon d’inscription. Vérifie les permissions du bot.", ephemeral: true });
+    }
+
+    await channel.send({
+      content: `Panel Staff publié pour le format **${FORMAT_LABELS[format]}**.`,
+      ...registrationPanel(format),
+    });
+    await safeReply(interaction, {
+      content: `Panel **${FORMAT_LABELS[format]}** publié dans <#${channel.id}>. Les panels des autres formats n’ont pas été modifiés.`,
+      ephemeral: true,
+    });
+  }
+
   private async confirmLaunch(interaction: ButtonInteraction): Promise<void> {
     if (!interaction.guild || !isStaff(interaction, this.config)) return safeReply(interaction, { content: "Permission Staff requise.", ephemeral: true });
     await safeReply(interaction, { content: "Le tirage existe déjà. Lancer officiellement le tournoi maintenant ?", components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button("staff-launch-confirm", "▶️ Confirmer le lancement", ButtonStyle.Success), button("staff-cancel", "Annuler", ButtonStyle.Secondary))], ephemeral: true });
@@ -843,12 +902,18 @@ function teamPanel() {
   return { embeds: [new EmbedBuilder().setTitle("🏆 CRÉATION DE TEAM").setDescription("Crée une team, gère ses membres et ses ressources privées.")], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button("team-create", "🏆 Créer ma team", ButtonStyle.Success), button("team-manage", "👥 Gérer ma team", ButtonStyle.Primary), button("team-delete", "🗑️ Supprimer ma team", ButtonStyle.Danger))] };
 }
 
-function registrationPanel() {
+function registrationPanel(format?: Format) {
+  if (format) {
+    return {
+      embeds: [new EmbedBuilder().setTitle(`📝 INSCRIPTION AU TOURNOI — ${FORMAT_LABELS[format]}`).setDescription(`Panel dédié au **${FORMAT_LABELS[format]}**.\nUne team reste une seule équipe dans le tournoi, même avec plusieurs squads.`)],
+      components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button(`format:${format}`, `✅ S’inscrire en ${FORMAT_LABELS[format]}`, ButtonStyle.Primary))],
+    };
+  }
   return { embeds: [new EmbedBuilder().setTitle("📝 INSCRIPTION AU TOURNOI").setDescription("Une team reste une seule équipe dans le tournoi, même avec plusieurs squads.")], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button("format:4", "4️⃣ 4v4", ButtonStyle.Primary), button("format:5", "5️⃣ 5v5", ButtonStyle.Primary), button("format:6", "6️⃣ 6v6", ButtonStyle.Primary))] };
 }
 
 function staffPanel() {
-  return { embeds: [new EmbedBuilder().setTitle("🏆 GESTION DU TOURNOI").setDescription("Staff/Admin autorisé uniquement. Tirage et lancement sont deux actions distinctes.")], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button("staff-registrations", "📝 Inscriptions", ButtonStyle.Secondary), button("staff-start-checkin", "🔔 Lancer check-in", ButtonStyle.Primary), button("staff-close-checkin", "⏹️ Fermer check-in", ButtonStyle.Primary), button("staff-draw", "🎲 Lancer tirage", ButtonStyle.Danger), button("staff-bracket", "📊 Bracket", ButtonStyle.Secondary)), new ActionRowBuilder<ButtonBuilder>().addComponents(button("staff-launch", "▶️ Lancer tournoi", ButtonStyle.Success), button("staff-pause", "⏸️ Pause", ButtonStyle.Secondary), button("staff-resume", "▶️ Reprendre", ButtonStyle.Success), button("staff-finish", "⏹️ Terminer", ButtonStyle.Danger))] };
+  return { embeds: [new EmbedBuilder().setTitle("🏆 GESTION DU TOURNOI").setDescription("Staff/Admin autorisé uniquement. Tirage et lancement sont deux actions distinctes.")], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button("staff-registrations", "📝 Inscriptions", ButtonStyle.Secondary), button("staff-publish-registration", "📢 Publier un format", ButtonStyle.Primary), button("staff-start-checkin", "🔔 Lancer check-in", ButtonStyle.Primary), button("staff-close-checkin", "⏹️ Fermer check-in", ButtonStyle.Primary), button("staff-draw", "🎲 Lancer tirage", ButtonStyle.Danger)), new ActionRowBuilder<ButtonBuilder>().addComponents(button("staff-bracket", "📊 Bracket", ButtonStyle.Secondary), button("staff-launch", "▶️ Lancer tournoi", ButtonStyle.Success), button("staff-pause", "⏸️ Pause", ButtonStyle.Secondary), button("staff-resume", "▶️ Reprendre", ButtonStyle.Success), button("staff-finish", "⏹️ Terminer", ButtonStyle.Danger))] };
 }
 
 function scorePanel() {
@@ -857,6 +922,10 @@ function scorePanel() {
 
 function teamManagementPanel(team: Team) {
   return { embeds: [new EmbedBuilder().setTitle("🏆 GESTION DE LA TEAM").setDescription(`Team **${team.name}** [${team.tag}]\nCapitaine : <@${team.captainId}>`)], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button(`team-manage-add:${team.id}`, "➕ Ajouter des membres", ButtonStyle.Primary), button(`team-manage-voice:${team.id}`, "🔊 Créer vocal", ButtonStyle.Secondary), button(`team-manage-delete:${team.id}`, "🗑️ Supprimer ma team", ButtonStyle.Danger))] };
+}
+
+function registrationChannelName(format: Format): string {
+  return `📝・inscription-${format}v${format}`;
 }
 
 function checkInPanel(team: Team, state: GuildTournamentState) {
