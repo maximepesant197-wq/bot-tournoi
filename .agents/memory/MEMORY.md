@@ -1,0 +1,1 @@
+- [Discord tournament runtime](discord-tournament-runtime.md) — privileged member intent and explicit Staff/Arbiter role checks are required for secure tournament panels.

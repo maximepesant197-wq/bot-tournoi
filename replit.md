@@ -1,6 +1,6 @@
-# [Project name]
+# Bot Discord Node.js
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Bot Discord de gestion complète de teams et de tournois Discord.
 
 ## Run & Operate
 
@@ -10,6 +10,10 @@ _Replace the heading above with the project's name, and this line with one sente
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - Required env: `DATABASE_URL` — Postgres connection string
+- `DISCORD_BOT_TOKEN` — secret requis pour activer le bot Discord
+- `DISCORD_GUILD_ID` — optionnel, enregistre les commandes immédiatement sur un serveur
+- `STAFF_ROLE_IDS` — optionnel, IDs de rôles Staff séparés par des virgules
+- `ARBITER_ROLE_IDS` — optionnel, IDs de rôles arbitres séparés par des virgules
 
 ## Stack
 
@@ -22,15 +26,20 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/api-server/src/discord/` — commandes, panels, permissions, logique tournoi et persistance du bot
+- `lib/db/src/schema/index.ts` — table PostgreSQL singleton contenant l’état restaurable du tournoi
+- `artifacts/api-server/src/routes/` — routes API existantes, conservées
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Le bot Discord et l’API santé tournent dans le même service pour conserver le workflow existant.
+- L’état complet est stocké en JSONB dans PostgreSQL et les mutations sont sérialisées pour éviter les doubles actions concurrentes.
+- Le tirage et le lancement sont volontairement deux actions séparées, chacune protégée par une confirmation Staff.
+- Les litiges utilisent un thread privé Discord réservé aux membres Staff/arbitres autorisés, sans ajouter de salon texte aux trois salons de base.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+Le bot crée des teams privées, leurs rôles/catégories/salons, gère les inscriptions 4v4/5v5/6v6, check-in, bracket éliminatoire, scores confirmés, litiges arbitres et classement final.
 
 ## User preferences
 
