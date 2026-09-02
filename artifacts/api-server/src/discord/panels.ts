@@ -277,6 +277,9 @@ export class PanelController {
       case "registration-captain":
         await this.selectRegistrationCaptain(interaction);
         return;
+      case "registration-members":
+        await this.selectRegistrationMembers(interaction);
+        return;
       case "staff-registration-format":
         await this.publishRegistrationPanel(interaction, formatFromValue(interaction.values[0] ?? ""));
         return;
@@ -601,10 +604,16 @@ export class PanelController {
     const team = interaction.guild ? this.store.getGuild(interaction.guild.id).teams[teamId] : undefined;
     if (!pending || !team || team.captainId !== interaction.user.id) return safeReply(interaction, { content: "Sélection expirée ou team non autorisée.", ephemeral: true });
     pending.teamId = teamId;
-    await interaction.reply({ content: "Sélectionne les joueurs inscrits (les squads seront réparties automatiquement par format).", components: [new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(new UserSelectMenuBuilder().setCustomId("registration-members").setPlaceholder("Joueurs inscrits").setMinValues(1).setMaxValues(25))], ephemeral: true });
+    const members = await Promise.all(team.memberIds.map(async (memberId) => interaction.guild?.members.fetch(memberId).catch(() => undefined)));
+    const options = members
+      .filter((member): member is NonNullable<typeof member> => Boolean(member))
+      .slice(0, 25)
+      .map((member) => ({ label: member.displayName.slice(0, 100), value: member.id, description: "Membre de ta team" }));
+    if (!options.length) return safeReply(interaction, { content: "Aucun membre Discord de cette team n’est disponible.", ephemeral: true });
+    await interaction.reply({ content: "Sélectionne les joueurs inscrits parmi les membres de ta team. Les squads seront réparties automatiquement par format.", components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId("registration-members").setPlaceholder("Membres de ta team").setMinValues(1).setMaxValues(Math.min(25, options.length)).addOptions(options))], ephemeral: true });
   }
 
-  private async selectRegistrationMembers(interaction: UserSelectMenuInteraction): Promise<void> {
+  private async selectRegistrationMembers(interaction: UserSelectMenuInteraction | StringSelectMenuInteraction): Promise<void> {
     const pending = this.pendingRegistrations.get(flowKey(interaction.guildId ?? "", interaction.user.id));
     const team = pending?.teamId && interaction.guild ? this.store.getGuild(interaction.guild.id).teams[pending.teamId] : undefined;
     if (!pending || !team || interaction.values.some((id) => !team.memberIds.includes(id))) return safeReply(interaction, { content: "Tous les joueurs doivent être membres de la team.", ephemeral: true });
