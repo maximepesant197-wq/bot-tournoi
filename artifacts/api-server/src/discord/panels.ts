@@ -112,6 +112,15 @@ export class PanelController {
     });
   }
 
+  private async sendStaffModerationPanel(interaction: ButtonInteraction): Promise<void> {
+    if (!isStaff(interaction, this.config)) return safeReply(interaction, { content: "Accès réservé au Staff/Admin.", ephemeral: true });
+    await safeReply(interaction, {
+      content: "Panel Staff — suppressions sensibles. Chaque action demande une confirmation.",
+      ...staffModerationPanel(),
+      ephemeral: true,
+    });
+  }
+
   public async sendDrawPrompt(interaction: ChatInputCommandInteraction | ButtonInteraction): Promise<void> {
     await interaction.reply({
       content: "Le tirage est une action irréversible pour le bracket courant. Confirmer ?",
@@ -153,7 +162,28 @@ export class PanelController {
       case "team-manage-add":
         await this.showMemberPicker(interaction, id, "team-add-members");
         return;
+      case "team-manage-remove":
+        await this.showRemoveMemberPicker(interaction, id);
+        return;
       case "team-add-members":
+        return;
+      case "staff-moderation":
+        await this.sendStaffModerationPanel(interaction);
+        return;
+      case "staff-delete-team":
+        await this.showStaffTeamDeletePicker(interaction);
+        return;
+      case "staff-delete-tournament":
+        await this.confirmTournamentDeletion(interaction);
+        return;
+      case "staff-delete-tournament-confirm":
+        await this.deleteTournament(interaction);
+        return;
+      case "staff-delete-member":
+        await this.showStaffMemberPicker(interaction);
+        return;
+      case "staff-member-delete-confirm":
+        await this.deleteStaffMember(interaction, id);
         return;
       case "team-manage-voice":
         await this.createVoice(interaction, id);
@@ -271,6 +301,12 @@ export class PanelController {
       case "team-add-members":
         await this.addMembers(interaction, id);
         return;
+      case "team-remove-members":
+        await this.removeMembers(interaction, id);
+        return;
+      case "staff-delete-member-select":
+        await this.selectStaffMember(interaction);
+        return;
       case "registration-members":
         await this.selectRegistrationMembers(interaction);
         return;
@@ -296,6 +332,9 @@ export class PanelController {
         return;
       case "registration-bench-members":
         await this.selectBenchMembers(interaction);
+        return;
+      case "staff-delete-team-select":
+        await this.selectStaffTeamForDeletion(interaction);
         return;
       case "staff-registration-format":
         await this.publishRegistrationPanel(interaction, formatFromValue(interaction.values[0] ?? ""));
@@ -327,6 +366,10 @@ export class PanelController {
 
   private async receiveTeamDetails(interaction: ModalSubmitInteraction): Promise<void> {
     if (!interaction.guild) return safeReply(interaction, { content: "Cette action doit être faite sur un serveur.", ephemeral: true });
+    const existingTeam = Object.values(this.store.getGuild(interaction.guild.id).teams).find((team) => team.memberIds.includes(interaction.user.id));
+    if (existingTeam) {
+      return safeReply(interaction, { content: `Tu appartiens déjà à la team **${existingTeam.name}** [${existingTeam.tag}]. Gère-la depuis son panel ou quitte-la avant d’en créer une autre.`, ephemeral: true });
+    }
     const name = interaction.fields.getTextInputValue("team-name").trim();
     const tag = interaction.fields.getTextInputValue("team-tag").trim().toUpperCase();
     if (!/^[\p{L}\p{N} _-]{2,32}$/u.test(name) || !/^[A-Z0-9_-]{2,8}$/.test(tag)) {
@@ -358,6 +401,12 @@ export class PanelController {
   private async selectTeamMembers(interaction: UserSelectMenuInteraction): Promise<void> {
     const pending = this.pendingTeams.get(flowKey(interaction.guildId ?? "", interaction.user.id));
     if (!pending) return safeReply(interaction, { content: "Création expirée, recommence avec /cree-ma-team.", ephemeral: true });
+    const state = interaction.guild ? this.store.getGuild(interaction.guild.id) : undefined;
+    const occupied = new Set(Object.values(state?.teams ?? {}).flatMap((team) => team.memberIds));
+    const alreadyInTeam = [...new Set(interaction.values)].filter((memberId) => occupied.has(memberId));
+    if (alreadyInTeam.length) {
+      return safeReply(interaction, { content: `Impossible d’ajouter ${alreadyInTeam.map((memberId) => `<@${memberId}>`).join(", ")} : ce(s) joueur(s) appartient/appartiennent déjà à une team.`, ephemeral: true });
+    }
     pending.memberIds = [...new Set([pending.ownerId, ...interaction.values])];
     await interaction.reply({
       content: `Étape 3/3 — ${pending.memberIds.length} joueur(s) sélectionné(s). Désigne le capitaine.`,
@@ -541,6 +590,59 @@ export class PanelController {
     await safeReply(interaction, { content: `${accepted.length} membre(s) ajouté(s).`, ephemeral: true });
   }
 
+  private async showRemoveMemberPicker(interaction: ButtonInteraction, teamId: string | undefined): Promise<void> {
+    if (!interaction.guild || !teamId) return safeReply(interaction, { content: "Team introuvable.", ephemeral: true });
+    const team = this.store.getGuild(interaction.guild.id).teams[teamId];
+    if (!team || !isCaptain(interaction, team) && !isStaff(interaction, this.config)) {
+      return safeReply(interaction, { content: "Seul le capitaine ou le Staff peut retirer un joueur.", ephemeral: true });
+    }
+    const removableCount = team.memberIds.filter((memberId) => memberId !== team.captainId).length;
+    if (!removableCount) return safeReply(interaction, { content: "Aucun joueur ne peut être retiré. Le capitaine doit rester dans la team.", ephemeral: true });
+    await safeReply(interaction, {
+      content: "Sélectionne les joueurs à retirer de cette team. Le capitaine ne peut pas être retiré.",
+      components: [
+        new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(
+          new UserSelectMenuBuilder().setCustomId(`team-remove-members:${teamId}`).setPlaceholder("Supprimer des joueurs").setMinValues(1).setMaxValues(Math.min(25, removableCount)),
+        ),
+      ],
+      ephemeral: true,
+    });
+  }
+
+  private async removeMembers(interaction: UserSelectMenuInteraction, teamId: string | undefined): Promise<void> {
+    if (!interaction.guild || !teamId) return safeReply(interaction, { content: "Team introuvable.", ephemeral: true });
+    const discordGuild = interaction.guild;
+    const current = this.store.getGuild(discordGuild.id).teams[teamId];
+    if (!current || !isCaptain(interaction, current) && !isStaff(interaction, this.config)) {
+      return safeReply(interaction, { content: "Permission refusée.", ephemeral: true });
+    }
+    const requested = [...new Set(interaction.values)];
+    const accepted = requested.filter((memberId) => current.memberIds.includes(memberId) && memberId !== current.captainId);
+    if (!accepted.length) {
+      return safeReply(interaction, { content: "Aucun joueur valide sélectionné. Le capitaine ne peut pas être retiré.", ephemeral: true });
+    }
+    await this.store.mutateGuild(discordGuild.id, (guild) => {
+      const team = guild.teams[teamId];
+      if (!team) return;
+      team.memberIds = team.memberIds.filter((memberId) => !accepted.includes(memberId));
+      for (const registration of Object.values(guild.registrations)) {
+        if (registration.teamId !== teamId) continue;
+        registration.playerIds = registration.playerIds.filter((memberId) => !accepted.includes(memberId));
+        registration.squads = registration.squads
+          .map((squad) => squad.filter((memberId) => !accepted.includes(memberId)))
+          .filter((squad) => squad.length > 0);
+        registration.benchIds = registration.benchIds.filter((memberId) => !accepted.includes(memberId));
+        for (const memberId of accepted) delete registration.checkIn[memberId];
+        if (registration.captainId && accepted.includes(registration.captainId)) {
+          registration.status = "excluded";
+          registration.excludedReason = "Joueur retiré de la team";
+        }
+      }
+    });
+    await Promise.all(accepted.map(async (memberId) => discordGuild.members.fetch(memberId).then((member) => member.roles.remove(current.roleId, "Retrait de la team")).catch(() => undefined)));
+    await safeReply(interaction, { content: `${accepted.length} joueur(s) retiré(s) de la team et des inscriptions associées.`, ephemeral: true });
+  }
+
   private async createVoice(interaction: ButtonInteraction, teamId: string | undefined): Promise<void> {
     if (!interaction.guild || !teamId) return safeReply(interaction, { content: "Team introuvable.", ephemeral: true });
     const team = this.store.getGuild(interaction.guild.id).teams[teamId];
@@ -557,7 +659,7 @@ export class PanelController {
     await safeReply(interaction, { content: `Vocal ${voice} créé dans la catégorie de la team.`, ephemeral: true });
   }
 
-  private async confirmTeamDeletion(interaction: ButtonInteraction, teamId: string | undefined): Promise<void> {
+  private async confirmTeamDeletion(interaction: ButtonInteraction | StringSelectMenuInteraction, teamId: string | undefined): Promise<void> {
     if (!interaction.guild || !teamId) return safeReply(interaction, { content: "Team introuvable.", ephemeral: true });
     const team = this.store.getGuild(interaction.guild.id).teams[teamId];
     if (!team || !isCaptain(interaction, team) && !isStaff(interaction, this.config)) return safeReply(interaction, { content: "Suppression réservée au capitaine ou au Staff.", ephemeral: true });
@@ -589,6 +691,118 @@ export class PanelController {
       });
     });
     await interaction.editReply({ content: "Team, salons, vocaux, rôle et données liés supprimés.", components: [] });
+  }
+
+  private async showStaffTeamDeletePicker(interaction: ButtonInteraction): Promise<void> {
+    if (!interaction.guild || !isStaff(interaction, this.config)) return safeReply(interaction, { content: "Accès réservé au Staff/Admin.", ephemeral: true });
+    const teams = Object.values(this.store.getGuild(interaction.guild.id).teams);
+    if (!teams.length) return safeReply(interaction, { content: "Aucune team à supprimer.", ephemeral: true });
+    await safeReply(interaction, {
+      content: "Sélectionne la team à supprimer. Ses salons, son rôle et ses données associées seront supprimés.",
+      components: [
+        new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId("staff-delete-team-select")
+            .setPlaceholder("Choisir une team")
+            .setMinValues(1)
+            .setMaxValues(1)
+            .addOptions(teams.slice(0, 25).map((team) => ({ label: `${team.name} [${team.tag}]`.slice(0, 100), value: team.id, description: `Capitaine : ${team.captainId}`.slice(0, 100) }))),
+        ),
+      ],
+      ephemeral: true,
+    });
+  }
+
+  private async selectStaffTeamForDeletion(interaction: StringSelectMenuInteraction): Promise<void> {
+    if (!isStaff(interaction, this.config)) return safeReply(interaction, { content: "Accès réservé au Staff/Admin.", ephemeral: true });
+    await this.confirmTeamDeletion(interaction, interaction.values[0]);
+  }
+
+  private async confirmTournamentDeletion(interaction: ButtonInteraction): Promise<void> {
+    if (!interaction.guild || !isStaff(interaction, this.config)) return safeReply(interaction, { content: "Accès réservé au Staff/Admin.", ephemeral: true });
+    const state = this.store.getGuild(interaction.guild.id);
+    const hasData = state.status !== "draft" || state.checkInOpen || Object.keys(state.registrations).length > 0 || Object.keys(state.matches).length > 0 || Object.keys(state.disputes).length > 0;
+    if (!hasData) return safeReply(interaction, { content: "Aucun tournoi actif ou enregistré à supprimer.", ephemeral: true });
+    await safeReply(interaction, {
+      content: "Supprimer les inscriptions, le check-in, le bracket, les litiges et le classement du tournoi ? Les teams et leurs salons seront conservés.",
+      components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button("staff-delete-tournament-confirm", "🗑️ Confirmer la suppression", ButtonStyle.Danger), button("staff-cancel", "Annuler", ButtonStyle.Secondary))],
+      ephemeral: true,
+    });
+  }
+
+  private async deleteTournament(interaction: ButtonInteraction): Promise<void> {
+    if (!interaction.guild || !isStaff(interaction, this.config)) return safeReply(interaction, { content: "Accès réservé au Staff/Admin.", ephemeral: true });
+    await this.store.mutateGuild(interaction.guild.id, (guild) => {
+      guild.status = "draft";
+      guild.checkInOpen = false;
+      guild.checkInClosedAt = undefined;
+      guild.registrations = {};
+      guild.matches = {};
+      guild.disputes = {};
+      guild.finalRanking = [];
+      guild.bracketVersion = 0;
+      delete guild.winnerId;
+    });
+    await safeReply(interaction, { content: "Tournoi supprimé. Les teams et leurs salons sont conservés.", components: [], ephemeral: true });
+  }
+
+  private async showStaffMemberPicker(interaction: ButtonInteraction): Promise<void> {
+    if (!interaction.guild || !isStaff(interaction, this.config)) return safeReply(interaction, { content: "Accès réservé au Staff/Admin.", ephemeral: true });
+    await safeReply(interaction, {
+      content: "Sélectionne le membre/troll à retirer du serveur. Les comptes Staff/Admin sont protégés.",
+      components: [
+        new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(
+          new UserSelectMenuBuilder().setCustomId("staff-delete-member-select").setPlaceholder("Choisir un membre/troll").setMinValues(1).setMaxValues(1),
+        ),
+      ],
+      ephemeral: true,
+    });
+  }
+
+  private async selectStaffMember(interaction: UserSelectMenuInteraction): Promise<void> {
+    if (!interaction.guild || !isStaff(interaction, this.config)) return safeReply(interaction, { content: "Accès réservé au Staff/Admin.", ephemeral: true });
+    const memberId = interaction.values[0];
+    const member = await interaction.guild.members.fetch(memberId).catch(() => undefined);
+    if (!member) return safeReply(interaction, { content: "Membre introuvable.", ephemeral: true });
+    if (member.user.bot || member.permissions.has(PermissionFlagsBits.Administrator) || this.config.staffRoleIds.some((roleId) => member.roles.cache.has(roleId)) || this.config.arbiterRoleIds.some((roleId) => member.roles.cache.has(roleId))) {
+      return safeReply(interaction, { content: "Ce compte est protégé et ne peut pas être retiré par ce panel.", ephemeral: true });
+    }
+    const team = Object.values(this.store.getGuild(interaction.guild.id).teams).find((candidate) => candidate.memberIds.includes(memberId));
+    if (team?.captainId === memberId) return safeReply(interaction, { content: "Ce membre est capitaine d’une team. Supprime d’abord la team ou change son capitaine.", ephemeral: true });
+    await safeReply(interaction, {
+      content: `Retirer définitivement ${member} du serveur et nettoyer ses teams/inscriptions ?`,
+      components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button(`staff-member-delete-confirm:${memberId}`, "🛡️ Confirmer le retrait", ButtonStyle.Danger), button("staff-cancel", "Annuler", ButtonStyle.Secondary))],
+      ephemeral: true,
+    });
+  }
+
+  private async deleteStaffMember(interaction: ButtonInteraction, memberId: string | undefined): Promise<void> {
+    if (!interaction.guild || !memberId || !isStaff(interaction, this.config)) return safeReply(interaction, { content: "Accès réservé au Staff/Admin.", ephemeral: true });
+    const member = await interaction.guild.members.fetch(memberId).catch(() => undefined);
+    if (!member) return safeReply(interaction, { content: "Membre introuvable ou déjà retiré.", ephemeral: true });
+    if (member.user.bot || member.permissions.has(PermissionFlagsBits.Administrator) || this.config.staffRoleIds.some((roleId) => member.roles.cache.has(roleId)) || this.config.arbiterRoleIds.some((roleId) => member.roles.cache.has(roleId))) {
+      return safeReply(interaction, { content: "Ce compte est protégé et ne peut pas être retiré par ce panel.", ephemeral: true });
+    }
+    const team = Object.values(this.store.getGuild(interaction.guild.id).teams).find((candidate) => candidate.memberIds.includes(memberId));
+    if (team?.captainId === memberId) return safeReply(interaction, { content: "Ce membre est capitaine d’une team. Supprime d’abord la team ou change son capitaine.", ephemeral: true });
+    const kicked = await member.kick("Retrait Staff — membre/troll").then(() => true).catch(() => false);
+    if (!kicked) return safeReply(interaction, { content: "Le bot ne peut pas retirer ce membre. Vérifie sa hiérarchie de rôles et ses permissions.", ephemeral: true });
+    await this.store.mutateGuild(interaction.guild.id, (guild) => {
+      for (const currentTeam of Object.values(guild.teams)) {
+        currentTeam.memberIds = currentTeam.memberIds.filter((id) => id !== memberId);
+      }
+      for (const registration of Object.values(guild.registrations)) {
+        registration.playerIds = registration.playerIds.filter((id) => id !== memberId);
+        registration.squads = registration.squads.map((squad) => squad.filter((id) => id !== memberId)).filter((squad) => squad.length > 0);
+        registration.benchIds = registration.benchIds.filter((id) => id !== memberId);
+        delete registration.checkIn[memberId];
+        if (registration.captainId === memberId) {
+          registration.status = "excluded";
+          registration.excludedReason = "Membre retiré du serveur";
+        }
+      }
+    });
+    await safeReply(interaction, { content: `${member.user.tag} a été retiré du serveur et nettoyé des teams/inscriptions.`, components: [], ephemeral: true });
   }
 
   private async confirmPresence(interaction: ButtonInteraction, all: boolean): Promise<void> {
@@ -1048,7 +1262,11 @@ function registrationPanel(format?: Format) {
 }
 
 function staffPanel() {
-  return { embeds: [new EmbedBuilder().setTitle("🏆 GESTION DU TOURNOI").setDescription("Staff/Admin autorisé uniquement. Tirage et lancement sont deux actions distinctes.")], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button("staff-registrations", "📝 Inscriptions", ButtonStyle.Secondary), button("staff-publish-registration", "📢 Publier un format", ButtonStyle.Primary), button("staff-start-checkin", "🔔 Lancer check-in", ButtonStyle.Primary), button("staff-close-checkin", "⏹️ Fermer check-in", ButtonStyle.Primary), button("staff-draw", "🎲 Lancer tirage", ButtonStyle.Danger)), new ActionRowBuilder<ButtonBuilder>().addComponents(button("staff-bracket", "📊 Bracket", ButtonStyle.Secondary), button("staff-launch", "▶️ Lancer tournoi", ButtonStyle.Success), button("staff-pause", "⏸️ Pause", ButtonStyle.Secondary), button("staff-resume", "▶️ Reprendre", ButtonStyle.Success), button("staff-finish", "⏹️ Terminer", ButtonStyle.Danger))] };
+  return { embeds: [new EmbedBuilder().setTitle("🏆 GESTION DU TOURNOI").setDescription("Staff/Admin autorisé uniquement. Tirage et lancement sont deux actions distinctes.")], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button("staff-registrations", "📝 Inscriptions", ButtonStyle.Secondary), button("staff-publish-registration", "📢 Publier un format", ButtonStyle.Primary), button("staff-start-checkin", "🔔 Lancer check-in", ButtonStyle.Primary), button("staff-close-checkin", "⏹️ Fermer check-in", ButtonStyle.Primary), button("staff-draw", "🎲 Lancer tirage", ButtonStyle.Danger)), new ActionRowBuilder<ButtonBuilder>().addComponents(button("staff-bracket", "📊 Bracket", ButtonStyle.Secondary), button("staff-launch", "▶️ Lancer tournoi", ButtonStyle.Success), button("staff-pause", "⏸️ Pause", ButtonStyle.Secondary), button("staff-resume", "▶️ Reprendre", ButtonStyle.Success), button("staff-finish", "⏹️ Terminer", ButtonStyle.Danger)), new ActionRowBuilder<ButtonBuilder>().addComponents(button("staff-moderation", "🛡️ Suppressions Staff", ButtonStyle.Danger))] };
+}
+
+function staffModerationPanel() {
+  return { embeds: [new EmbedBuilder().setTitle("🛡️ SUPPRESSIONS STAFF").setDescription("Actions réservées au Staff/Admin.\n\n• Supprimer une team : supprime ses salons, vocaux, rôle et données.\n• Supprimer le tournoi : efface le bracket, les inscriptions et les litiges, sans supprimer les teams.\n• Retirer un membre/troll : le retire du serveur et nettoie ses teams/inscriptions.")], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button("staff-delete-team", "🗑️ Supprimer une team", ButtonStyle.Danger), button("staff-delete-tournament", "🏆 Supprimer le tournoi", ButtonStyle.Danger), button("staff-delete-member", "👤 Retirer un membre/troll", ButtonStyle.Danger))] };
 }
 
 function scorePanel() {
@@ -1056,7 +1274,7 @@ function scorePanel() {
 }
 
 function teamManagementPanel(team: Team) {
-  return { embeds: [new EmbedBuilder().setTitle("🏆 GESTION DE LA TEAM").setDescription(`Team **${team.name}** [${team.tag}]\nCapitaine : <@${team.captainId}>`)], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button(`team-manage-add:${team.id}`, "➕ Ajouter des membres", ButtonStyle.Primary), button(`team-manage-voice:${team.id}`, "🔊 Créer vocal", ButtonStyle.Secondary), button(`team-manage-delete:${team.id}`, "🗑️ Supprimer ma team", ButtonStyle.Danger))] };
+  return { embeds: [new EmbedBuilder().setTitle("🏆 GESTION DE LA TEAM").setDescription(`Team **${team.name}** [${team.tag}]\nCapitaine : <@${team.captainId}>`)], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button(`team-manage-add:${team.id}`, "➕ Ajouter des membres", ButtonStyle.Primary), button(`team-manage-remove:${team.id}`, "➖ Supprimer des joueurs", ButtonStyle.Secondary), button(`team-manage-voice:${team.id}`, "🔊 Créer vocal", ButtonStyle.Secondary), button(`team-manage-delete:${team.id}`, "🗑️ Supprimer ma team", ButtonStyle.Danger))] };
 }
 
 function registrationChannelName(format: Format): string {
