@@ -32,6 +32,18 @@ export class TournamentStore {
     const saved = rows[0]?.data;
     if (isState(saved)) {
       this.state = saved;
+      let normalized = false;
+      for (const guild of Object.values(this.state.guilds)) {
+        if (guild.status === "finished" && Object.keys(guild.matches).length === 0) {
+          guild.status = "draft";
+          guild.checkInOpen = false;
+          guild.checkInClosedAt = undefined;
+          guild.finalRanking = [];
+          delete guild.winnerId;
+          normalized = true;
+        }
+      }
+      if (normalized) await this.persist();
       this.logger.info({ guilds: Object.keys(saved.guilds).length }, "Tournament state restored");
       return;
     }

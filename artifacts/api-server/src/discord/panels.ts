@@ -786,6 +786,9 @@ export class PanelController {
 
   private async finish(interaction: ButtonInteraction): Promise<void> {
     if (!interaction.guild || !isStaff(interaction, this.config)) return safeReply(interaction, { content: "Permission Staff requise.", ephemeral: true });
+    if (Object.keys(this.store.getGuild(interaction.guild.id).matches).length === 0) {
+      return safeReply(interaction, { content: "Aucun tournoi à terminer : le bracket n’a pas encore été généré.", ephemeral: true });
+    }
     let ranking: string[] = [];
     await this.store.mutateGuild(interaction.guild.id, (guild) => { guild.status = "finished"; ranking = calculateRanking(guild); guild.finalRanking = ranking; guild.winnerId = ranking[0]; });
     await safeReply(interaction, { content: `🔴 TOURNOI TERMINÉ.\nClassement sauvegardé : ${ranking.map((id, index) => `${index + 1}. ${guildTeamName(this.store.getGuild(interaction.guild!.id), id)}`).join(" · ") || "aucun résultat"}`, ephemeral: true });
