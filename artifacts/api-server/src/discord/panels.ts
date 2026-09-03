@@ -1,5 +1,6 @@
 import {
   ActionRowBuilder,
+  AttachmentBuilder,
   ButtonBuilder,
   ButtonInteraction,
   ButtonStyle,
@@ -31,6 +32,7 @@ import {
   userId,
 } from "./permissions";
 import { TournamentStore } from "./store";
+import { renderBracketImage } from "./bracket-image";
 import {
   activateAvailableMatches,
   calculateRanking,
@@ -1129,7 +1131,19 @@ export class PanelController {
   private async replyBracket(interaction: ButtonInteraction): Promise<void> {
     if (!interaction.guild) return safeReply(interaction, { content: "Serveur introuvable.", ephemeral: true });
     const guild = this.store.getGuild(interaction.guild.id);
-    await safeReply(interaction, { content: bracketText(guild), ephemeral: true });
+    try {
+      const image = await renderBracketImage(guild);
+      const attachment = new AttachmentBuilder(image, { name: "bracket-arena.png", description: "Bracket double élimination Arena FR" });
+      await safeReply(interaction, {
+        content: "📊 Bracket double élimination — actualisé avec les équipes et scores enregistrés.",
+        embeds: [new EmbedBuilder().setTitle("🏆 ARENA FR — BRACKET").setColor(0x0f172a).setImage("attachment://bracket-arena.png")],
+        files: [attachment],
+        ephemeral: true,
+      });
+    } catch (error) {
+      this.logger.error({ err: error, guildId: guild.guildId }, "Unable to render bracket image");
+      await safeReply(interaction, { content: "Impossible de générer l’image du bracket. Le bracket texte reste disponible :\n\n" + bracketText(guild), ephemeral: true });
+    }
   }
 
   private async replyMyMatch(interaction: ButtonInteraction): Promise<void> {

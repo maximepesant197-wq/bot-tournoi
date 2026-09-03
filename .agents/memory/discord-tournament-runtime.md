@@ -14,3 +14,9 @@ Destructive actions must stay scoped: team deletion removes the team’s Discord
 **Why:** These resources have different ownership and lifecycle boundaries; combining them can accidentally remove a team’s private Discord setup or leave an invalid captain state.
 
 **How to apply:** Give each destructive scope its own Staff panel action and confirmation, then revalidate the target and permissions immediately before mutating Discord or PostgreSQL state.
+
+The visual bracket is rendered at runtime from SVG to PNG through the environment’s ImageMagick `convert` command.
+
+**Why:** Discord can display the generated PNG inline reliably, while a raw SVG attachment is not consistently previewed across clients.
+
+**How to apply:** Keep the renderer failure path visible and verify `convert` is available whenever the runtime or deployment environment changes.
