@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import sharp from "sharp";
 import type { GuildTournamentState, Match } from "./types";
 
 const WIDTH = 2000;
@@ -20,7 +20,11 @@ export async function renderBracketImage(state: GuildTournamentState): Promise<B
 }
 
 function buildBracketSvg(state: GuildTournamentState): string {
-  const matches = Object.values(state.matches);
+  const matches = Object.values(state.matches).filter(m => {
+    // Ne pas afficher les matchs vides Bye vs Bye
+    if (!m.teamAId && !m.teamBId && !m.winnerId && m.bracket === "winners" && m.round === 1) return false;
+    return true;
+  });
   const winners = matches
     .filter((match) => (match.bracket ?? "winners") === "winners")
     .sort(matchOrder);
@@ -237,18 +241,8 @@ function matchOrder(left: Match, right: Match): number {
   return left.round - right.round || left.position - right.position;
 }
 
-function renderSvgToPng(svg: string): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const process = spawn("convert", ["svg:-", "png:-"]);
-    const chunks: Buffer[] = [];
-    let errorOutput = "";
-    process.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
-    process.stderr.on("data", (chunk: Buffer) => { errorOutput += chunk.toString(); });
-    process.on("error", reject);
-    process.on("close", (code) => {
-      if (code === 0 && chunks.length) resolve(Buffer.concat(chunks));
-      else reject(new Error(`Bracket image rendering failed (${code}): ${errorOutput}`));
-    });
-    process.stdin.end(svg);
-  });
-}
+// FIX: plus de spawn("convert") qui plante sur Railway
+// On utilise sharp qui est natif et déjà dispo
+async function renderSvgToPng(svg: string): Promise<Buffer> {
+  return await sharp(Buffer.from(svg)).png().toBuffer();
+        }
