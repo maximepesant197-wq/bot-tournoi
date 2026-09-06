@@ -8,7 +8,6 @@ import type { Logger } from "pino";
 import { getDiscordConfig } from "./config";
 import { routeCommand, registerCommands } from "./commands";
 import { PanelController } from "./panels";
-import { isStaff } from "./permissions";
 import { TournamentStore } from "./store";
 
 export async function startDiscordBot(logger: Logger): Promise<{
@@ -27,16 +26,22 @@ export async function startDiscordBot(logger: Logger): Promise<{
       GatewayIntentBits.GuildMembers,
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.DirectMessages,
+      GatewayIntentBits.MessageContent,
     ],
     partials: [Partials.Channel],
   });
+  
   const store = new TournamentStore(logger);
   await store.init();
   const panels = new PanelController(client, store, config, logger);
 
   client.once(Events.ClientReady, async (readyClient) => {
-    await registerCommands(readyClient, config);
-    logger.info({ user: readyClient.user.tag }, "Discord bot ready");
+    try {
+      await registerCommands(readyClient, config);
+      logger.info({ user: readyClient.user.tag, guilds: readyClient.guilds.cache.size }, "Discord bot ready - +16 teams fix loaded");
+    } catch (e) {
+      logger.error({ err: e }, "Failed to register commands");
+    }
   });
 
   client.on(Events.InteractionCreate, async (interaction) => {
@@ -53,9 +58,9 @@ export async function startDiscordBot(logger: Logger): Promise<{
         await panels.handleModal(interaction);
       }
     } catch (error) {
-      logger.error({ err: error, interactionId: interaction.id }, "Discord interaction failed");
+      logger.error({ err: error, interactionId: interaction.id, customId: (interaction as any).customId }, "Discord interaction failed");
       if (interaction.isRepliable()) {
-        const message = "Une erreur est survenue. Vérifie les permissions du bot et réessaie.";
+        const message = "Une erreur est survenue. Vérifie les permissions du bot et réessaie. Si c'est l'image du bracket, vérifie que `sharp` est installé dans package.json";
         if (interaction.replied || interaction.deferred) {
           await interaction.followUp({ content: message, ephemeral: true }).catch(() => undefined);
         } else {
