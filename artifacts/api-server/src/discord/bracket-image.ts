@@ -245,4 +245,4 @@ function matchOrder(left: Match, right: Match): number {
 // On utilise sharp qui est natif et déjà dispo
 async function renderSvgToPng(svg: string): Promise<Buffer> {
   return await sharp(Buffer.from(svg)).png().toBuffer();
-        }
+    }
