@@ -48,12 +48,15 @@ export function createBracket(guild: GuildTournamentState, teamIds: string[]): v
   guild.matches = {};
   guild.bracketVersion += 1;
   const shuffled = [...teamIds].sort(() => Math.random() - 0.5);
-  const firstRoundCount = Math.max(1, Math.ceil(shuffled.length / 2));
-  const winnersRoundCount = Math.max(1, Math.ceil(Math.log2(Math.max(2, shuffled.length))));
+  
+  // Fix: calcul propre puissance de 2 pour éviter les matchs Bye vs Bye vides
+  const totalSlots = Math.max(2, Math.pow(2, Math.ceil(Math.log2(Math.max(2, shuffled.length)))));
+  const firstRoundCount = totalSlots / 2;
+  const winnersRoundCount = Math.log2(totalSlots);
   const winnersRounds: Match[][] = [];
 
   for (let round = 1; round <= winnersRoundCount; round += 1) {
-    const count = round === 1 ? firstRoundCount : Math.ceil(firstRoundCount / 2 ** (round - 1));
+    const count = totalSlots / Math.pow(2, round);
     const matches: Match[] = [];
     for (let position = 0; position < count; position += 1) {
       const id = `match-${guild.bracketVersion}-w${round}-${position + 1}`;
@@ -67,8 +70,15 @@ export function createBracket(guild: GuildTournamentState, teamIds: string[]): v
       if (round === 1) {
         match.teamAId = shuffled[position * 2];
         match.teamBId = shuffled[position * 2 + 1];
-        if (!match.teamBId && match.teamAId) {
+        // Bye auto-win
+        if (match.teamAId && !match.teamBId) {
           match.winnerId = match.teamAId;
+          match.status = "completed";
+        } else if (!match.teamAId && match.teamBId) {
+          match.winnerId = match.teamBId;
+          match.status = "completed";
+        } else if (!match.teamAId && !match.teamBId) {
+          // Match vide inutile (quand 6 teams sur 8 slots) -> on le marque completed sans winner
           match.status = "completed";
         }
       }
@@ -79,8 +89,10 @@ export function createBracket(guild: GuildTournamentState, teamIds: string[]): v
   }
 
   const losersRounds: Match[][] = [];
-  for (let round = 1; round <= Math.max(0, (winnersRoundCount - 1) * 2); round += 1) {
-    const count = Math.max(1, Math.ceil(firstRoundCount / 2 ** Math.ceil(round / 2)));
+  // Fix: toujours au moins 1 round de losers si on a 2+ teams, sinon la grande finale ne se remplit jamais
+  const loserRoundTotal = Math.max(1, (winnersRoundCount - 1) * 2);
+  for (let round = 1; round <= loserRoundTotal; round += 1) {
+    const count = Math.max(1, Math.ceil(firstRoundCount / Math.pow(2, Math.ceil(round / 2))));
     const matches: Match[] = [];
     for (let position = 0; position < count; position += 1) {
       const id = `match-${guild.bracketVersion}-l${round}-${position + 1}`;
@@ -116,7 +128,7 @@ export function createBracket(guild: GuildTournamentState, teamIds: string[]): v
       const loserRound = round === 0 ? 0 : (round * 2) - 1;
       match.loserNextMatchId = losersRounds.length === 0
         ? grandFinal.id
-        : losersRounds[loserRound]?.[round === 0 ? Math.floor(index / 2) : index]?.id;
+        : losersRounds[loserRound]?.[round === 0 ? Math.floor(index / 2) : index]?.id ?? grandFinal.id;
     });
   }
 
@@ -134,10 +146,6 @@ export function createBracket(guild: GuildTournamentState, teamIds: string[]): v
   for (const match of winnersRounds[0]) {
     if (match.status === "completed" && match.winnerId) {
       advanceWinner(guild, match);
-    }
-  }
-  for (const match of Object.values(guild.matches)) {
-    if (match.status === "completed" && match.winnerId) {
       advanceLoser(guild, match);
     }
   }
@@ -185,10 +193,35 @@ export function confirmScore(
     return { ok: false, error: "Ce score ne peut plus être confirmé." };
   }
   if (match.proposedBy === confirmerId) {
-    return { ok: false, error: "Le capitaine adverse doit confirmer le score." };
+    return { ok: false, error: "Tu ne peux pas confirmer ton propre score. Attends l'adverse." };
   }
   if (match.scoreA === undefined || match.scoreB === undefined) {
     return { ok: false, error: "Le score proposé est incomplet." };
+  }
+
+  // FIX PRINCIPAL : vérifie vraiment les capitaines
+  const captainA = match.teamAId ? registrationsForTeam(guild, match.teamAId)?.captainId : undefined;
+  const captainB = match.teamBId ? registrationsForTeam(guild, match.teamBId)?.captainId : undefined;
+
+  if (!captainA || !captainB) {
+    return { ok: false, error: "Impossible de trouver les capitaines des équipes." };
+  }
+
+  // Le confirmer doit être un des deux capitaines
+  if (confirmerId !== captainA && confirmerId !== captainB) {
+    return { ok: false, error: "Seul un capitaine du match peut confirmer." };
+  }
+
+  // Et il doit être l'adverse du proposant
+  const proposerIsA = match.proposedBy === captainA;
+  const proposerIsB = match.proposedBy === captainB;
+  
+  // Si le proposant n'est pas capitaine (cas admin), on autorise l'autre capitaine
+  if (proposerIsA && confirmerId !== captainB) {
+    return { ok: false, error: "Seul le capitaine adverse peut confirmer." };
+  }
+  if (proposerIsB && confirmerId !== captainA) {
+    return { ok: false, error: "Seul le capitaine adverse peut confirmer." };
   }
 
   match.winnerId = match.scoreA > match.scoreB ? match.teamAId : match.teamBId;
@@ -237,6 +270,8 @@ function advanceWinner(guild: GuildTournamentState, match: Match): void {
 
 function advanceLoser(guild: GuildTournamentState, match: Match): void {
   if (match.bracket !== "winners" || !match.loserNextMatchId || !match.winnerId) return;
+  // FIX: ne pas avancer de perdant si c'était un BYE
+  if (!match.teamAId || !match.teamBId) return;
   const loserId = match.teamAId === match.winnerId ? match.teamBId : match.teamAId;
   if (!loserId) return;
   const next = guild.matches[match.loserNextMatchId];
@@ -252,7 +287,11 @@ function advanceLoser(guild: GuildTournamentState, match: Match): void {
 
 export function isTournamentComplete(guild: GuildTournamentState): boolean {
   const matches = Object.values(guild.matches);
-  return matches.length > 0 && matches.every((match) => match.status === "completed");
+  return matches.length > 0 && matches.every((match) => {
+    // Ignore les matchs vides Bye vs Bye
+    if (!match.teamAId && !match.teamBId && !match.winnerId) return true;
+    return match.status === "completed";
+  });
 }
 
 export function calculateRanking(guild: GuildTournamentState): string[] {
@@ -273,4 +312,5 @@ function bracketWeight(bracket: BracketLane | undefined): number {
   if (bracket === "grand-final") return 3;
   if (bracket === "winners") return 2;
   return 1;
-}
+    }
+                                 
