@@ -31,6 +31,15 @@ export function isArbiter(interaction: Interaction, config: DiscordConfig): bool
   );
 }
 
+export function isMod(interaction: Interaction, config: DiscordConfig): boolean {
+  const member = memberOf(interaction);
+  if (!member) return false;
+  return (
+    isStaff(interaction, config) ||
+    (config.modRoleIds?.some((roleId) => member.roles.cache.has(roleId)) ?? false)
+  );
+}
+
 export function userId(interaction: Interaction): string {
   return interaction.user.id;
 }
@@ -41,6 +50,14 @@ export function isCaptain(interaction: Interaction, team: Team): boolean {
 
 export function canManageTeam(interaction: Interaction, team: Team, config: DiscordConfig): boolean {
   return isStaff(interaction, config) || isCaptain(interaction, team);
+}
+
+export function canManageTeamOrMod(
+  interaction: Interaction,
+  team: Team,
+  config: DiscordConfig,
+): boolean {
+  return canManageTeam(interaction, team, config) || isMod(interaction, config);
 }
 
 export function requireGuild(
