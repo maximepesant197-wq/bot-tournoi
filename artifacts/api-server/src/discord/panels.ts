@@ -7,51 +7,35 @@ import {
   ChannelType,
   Client,
   EmbedBuilder,
-  Guild,
   ModalBuilder,
-  PermissionFlagsBits,
+  ModalSubmitInteraction,
   StringSelectMenuBuilder,
   StringSelectMenuInteraction,
-  TextChannel,
   TextInputBuilder,
   TextInputStyle,
   UserSelectMenuBuilder,
   UserSelectMenuInteraction,
   type ChatInputCommandInteraction,
   type InteractionReplyOptions,
-  type ModalSubmitInteraction,
 } from "discord.js";
 import type { Logger } from "pino";
 import type { DiscordConfig } from "./config";
 import {
   canManageTeam,
   isArbiter,
-  isCaptain,
   isStaff,
-  memberOf,
   userId,
 } from "./permissions";
 import { TournamentStore } from "./store";
 import { renderBracketImage, buildBracketSvg } from "./bracket-image";
 import {
   activateAvailableMatches,
-  calculateRanking,
   confirmScore,
   createBracket,
-  FORMAT_LABELS,
   formatFromValue,
-  isTournamentComplete,
-  registrationIsComplete,
-  registrationsForTeam,
-  resolveScore,
-  submitScore,
 } from "./tournament";
 import type {
-  Dispute,
   Format,
-  GuildTournamentState,
-  Match,
-  Registration,
   Team,
 } from "./types";
 
@@ -154,7 +138,7 @@ export class PanelController {
         await interaction.showModal(teamCreationModal());
         return;
       case "team-create-continue":
-        await this.showCaptainPicker(interaction, "team-create");
+        await this.showCaptainPicker(interaction);
         return;
       case "team-create-confirm":
         await this.createTeam(interaction);
@@ -283,7 +267,7 @@ export class PanelController {
         await this.confirmProposedScore(interaction, id, contextId);
         return;
       case "score-dispute":
-        await this.openDispute(interaction, id, contextId);
+        await this.openDispute(interaction, id);
         return;
       case "dispute-call":
         await this.callArbiter(interaction, id);
@@ -329,7 +313,7 @@ export class PanelController {
         const svg = buildBracketSvg(state);
         const attachment = new AttachmentBuilder(Buffer.from(svg), { name: "bracket.svg" });
         await interaction.editReply({
-          content: "⚠️ PNG échoué (installe `sharp` dans package.json). Voici le SVG :",
+          content: "⚠️ PNG échoué. Voici le SVG :",
           files: [attachment],
         });
       } catch (e) {
@@ -487,7 +471,7 @@ export class PanelController {
     }
 
     await safeReply(interaction, {
-      content: `⚠️ **Supprimer la team ${myTeam.name} [${myTeam.tag}] ?**\n\nCette action déplacera **tous les salons** vers la catégorie d'archivage, supprimera le rôle de la team, la catégorie et les données liées à la team (matchs, check-in et classement).\n\n**Cette action est irréversible.**`,
+      content: `⚠️ **Supprimer la team ${myTeam.name} [${myTeam.tag}] ?**\n\nCette action déplacera **tous les salons** vers la catégorie d'archivage, supprimera le rôle de la team, la catégorie et les données liées à la team.\n\n**Cette action est irréversible.**`,
       components: [
         new ActionRowBuilder<ButtonBuilder>().addComponents(
           button(`team-delete-confirm:${myTeam.id}`, "🗑️ Confirmer la suppression", ButtonStyle.Danger),
@@ -524,7 +508,6 @@ export class PanelController {
     });
   }
 
-  // Helper pour vérifier la gestion par Capitaine, Staff ou Modérateur (1514982380161732628)
   private canManageTeamOrMod(interaction: ButtonInteraction, team: Team): boolean {
     if (canManageTeam(interaction, team, this.config)) return true;
 
@@ -549,9 +532,8 @@ export class PanelController {
 
     if (!id) {
       return safeReply(interaction, { content: "Team introuvable.", ephemeral: true });
-    }
-
-    const team = state.teams[id];
+           }
+        const team = state.teams[id];
     if (!team) {
       return safeReply(interaction, { content: "Team introuvable ou déjà supprimée.", ephemeral: true });
     }
@@ -568,25 +550,21 @@ export class PanelController {
     const errors: string[] = [];
     const targetCategoryId = "1547325033989414952";
 
-    // 1. Récupération de la catégorie d'origine et de la catégorie d'archivage
     const currentCategory = guild.channels.cache.get(team.categoryId) ?? await guild.channels.fetch(team.categoryId).catch(() => null);
     const targetCategory = guild.channels.cache.get(targetCategoryId) ?? await guild.channels.fetch(targetCategoryId).catch(() => null);
 
     if (!targetCategory || targetCategory.type !== ChannelType.GuildCategory) {
       errors.push(`La catégorie cible d'archivage (ID: ${targetCategoryId}) n'a pas été trouvée sur le serveur.`);
     } else if (currentCategory && currentCategory.type === ChannelType.GuildCategory) {
-      // 2. Déplacement de tous les salons vers la catégorie cible + synchronisation des permissions Staff
       const children = guild.channels.cache.filter(c => c.parentId === currentCategory.id);
       for (const [_, channel] of children) {
         try {
-          // lockPermissions: true synchronise les permissions avec la catégorie cible
           await channel.setParent(targetCategoryId, { lockPermissions: true });
         } catch (err) {
           errors.push(`Impossible de déplacer le salon ${channel.name} : ${String(err).slice(0, 100)}`);
         }
       }
 
-      // 3. Suppression de la catégorie d'origine vide
       try {
         await currentCategory.delete(`Suppression/Archivage de la team ${team.name}`);
       } catch (err) {
@@ -594,7 +572,6 @@ export class PanelController {
       }
     }
 
-    // 4. Suppression du rôle de la team
     try {
       const role = guild.roles.cache.get(team.roleId) ?? await guild.roles.fetch(team.roleId).catch(() => null);
       if (role) {
@@ -604,7 +581,6 @@ export class PanelController {
       errors.push(`Erreur lors de la suppression du rôle : ${String(err).slice(0, 100)}`);
     }
 
-    // 5. Nettoyage de la base de données
     try {
       await this.store.deleteTeamFully(guild.id, id);
     } catch (err) {
@@ -613,7 +589,7 @@ export class PanelController {
 
     if (errors.length === 0) {
       await interaction.editReply({
-        content: `✅ **La team ${team.name} [${team.tag}] a été supprimée.**\nTous ses salons ont été déplacés dans la catégorie d'archivage avec les permissions du Staff, son rôle et sa catégorie d'origine ont été supprimés.`,
+        content: `✅ **La team ${team.name} [${team.tag}] a été supprimée.**\nTous ses salons ont été déplacés dans la catégorie d'archivage avec les permissions du Staff.`,
         components: [],
       });
     } else {
@@ -623,251 +599,4 @@ export class PanelController {
       });
     }
   }
-
-  private async showMemberPicker(
-    interaction: ButtonInteraction,
-    teamId: string,
-    action: string,
-  ): Promise<void> {
-    await safeReply(interaction, {
-      content: "Sélectionne les joueurs à ajouter :",
-      components: [
-        new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(
-          new UserSelectMenuBuilder()
-            .setCustomId(`${action}:${teamId}`)
-            .setPlaceholder("Joueurs")
-            .setMinValues(1)
-            .setMaxValues(10),
-        ),
-      ],
-      ephemeral: true,
-    });
-  }
-
-  private async showRemoveMemberPicker(
-    interaction: ButtonInteraction,
-    teamId: string,
-  ): Promise<void> {
-    const guild = interaction.guild;
-    if (!guild) return;
-
-    const state = this.store.getGuild(guild.id);
-    const team = state.teams[teamId];
-
-    if (!team) return;
-
-    const options = team.memberIds.map(id => ({
-      label: id,
-      value: id,
-    }));
-
-    const select = new StringSelectMenuBuilder()
-      .setCustomId(`team-remove-members:${teamId}`)
-      .setPlaceholder("Retirer")
-      .addOptions(options.slice(0, 25));
-
-    await safeReply(interaction, {
-      components: [
-        new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select),
-      ],
-      ephemeral: true,
-    });
-  }
-
-  private async showStaffTeamDeletePicker(
-    interaction: ButtonInteraction,
-  ): Promise<void> {
-    const state = this.store.getGuild(interaction.guild!.id);
-
-    const select = new StringSelectMenuBuilder()
-      .setCustomId("staff-delete-team-select")
-      .setPlaceholder("Team à supprimer")
-      .addOptions(
-        Object.values(state.teams)
-          .slice(0, 25)
-          .map(t => ({
-            label: `${t.name} [${t.tag}]`,
-            value: t.id,
-          })),
-      );
-
-    await safeReply(interaction, {
-      components: [
-        new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select),
-      ],
-      ephemeral: true,
-    });
-  }
-
-  private async confirmTournamentDeletion(
-    interaction: ButtonInteraction,
-  ): Promise<void> {
-    await safeReply(interaction, {
-      content: "Supprimer TOUT le tournoi ? Irréversible !",
-      components: [
-        new ActionRowBuilder<ButtonBuilder>().addComponents(
-          button(
-            "staff-delete-tournament-confirm",
-            "🗑️ Confirmer suppression",
-            ButtonStyle.Danger,
-          ),
-          button(
-            "staff-cancel",
-            "Annuler",
-            ButtonStyle.Secondary,
-          ),
-        ),
-      ],
-      ephemeral: true,
-    });
-  }
-
-  // ==================== STUBS DE MÉTHODES ====================
-
-  private async showCaptainPicker(interaction: ButtonInteraction, type: string): Promise<void> {}
-  private async createTeam(interaction: ButtonInteraction | ModalSubmitInteraction): Promise<void> {}
-  private async createVoice(interaction: ButtonInteraction, teamId: string): Promise<void> {}
-  private async confirmPresence(interaction: ButtonInteraction, all: boolean): Promise<void> {}
-  private async startRegistration(interaction: ButtonInteraction, format: Format): Promise<void> {}
-  private async confirmRegistration(interaction: ButtonInteraction): Promise<void> {}
-  private async showAdditionalSquadPicker(interaction: ButtonInteraction): Promise<void> {}
-  private async showBenchPicker(interaction: ButtonInteraction): Promise<void> {}
-  private async showRegistrationCaptainPicker(interaction: ButtonInteraction): Promise<void> {}
-  private async replyRegistrations(interaction: ButtonInteraction): Promise<void> {}
-  private async sendStaffRegistrationFormatPicker(interaction: ButtonInteraction): Promise<void> {}
-  private async publishRegistrationPanel(interaction: ButtonInteraction, format: Format): Promise<void> {}
-  private async startCheckIn(interaction: ButtonInteraction): Promise<void> {}
-  private async closeCheckIn(interaction: ButtonInteraction): Promise<void> {}
-  private async draw(interaction: ButtonInteraction): Promise<void> {}
-  private async confirmLaunch(interaction: ButtonInteraction): Promise<void> {}
-  private async launch(interaction: ButtonInteraction): Promise<void> {}
-  private async pause(interaction: ButtonInteraction): Promise<void> {}
-  private async resume(interaction: ButtonInteraction): Promise<void> {}
-  private async confirmFinish(interaction: ButtonInteraction): Promise<void> {}
-  private async finish(interaction: ButtonInteraction): Promise<void> {}
-  private async deleteTournament(interaction: ButtonInteraction): Promise<void> {}
-  private async showStaffMemberPicker(interaction: ButtonInteraction): Promise<void> {}
-  private async deleteStaffMember(interaction: ButtonInteraction, id: string): Promise<void> {}
-  private async openDispute(interaction: ButtonInteraction, matchId: string, contextId?: string): Promise<void> {}
-  private async callArbiter(interaction: ButtonInteraction, matchId: string): Promise<void> {}
-  private async showDisputeResolution(interaction: ButtonInteraction, matchId: string): Promise<void> {}
-}
-
-// ==================== HELPER FUNCTIONS ====================
-
-function button(customId: string, label: string, style: ButtonStyle = ButtonStyle.Primary): ButtonBuilder {
-  return new ButtonBuilder().setCustomId(customId).setLabel(label).setStyle(style);
-}
-
-function teamPanel(): { components: ActionRowBuilder<ButtonBuilder>[] } {
-  return {
-    components: [
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        button("team-create", "➕ Créer une team", ButtonStyle.Success),
-        button("team-manage", "⚙️ Gérer ma team", ButtonStyle.Primary),
-        button("team-delete", "🗑️ Supprimer ma team", ButtonStyle.Danger),
-      ),
-    ],
-  };
-}
-
-function registrationPanel(): { components: ActionRowBuilder<ButtonBuilder>[] } {
-  return {
-    components: [
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        button("format:1v1", "Inscription 1v1", ButtonStyle.Primary),
-        button("format:2v2", "Inscription 2v2", ButtonStyle.Primary),
-        button("format:4v4", "Inscription 4v4", ButtonStyle.Primary),
-      ),
-    ],
-  };
-}
-
-function staffPanel(): { components: ActionRowBuilder<ButtonBuilder>[] } {
-  return {
-    components: [
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        button("staff-publish-registration", "📢 Ouvrir Inscriptions", ButtonStyle.Primary),
-        button("staff-start-checkin", "📍 Lancer Check-in", ButtonStyle.Primary),
-        button("staff-draw", "🎲 Tirage au sort", ButtonStyle.Secondary),
-        button("staff-launch", "🚀 Lancer Tournoi", ButtonStyle.Success),
-        button("staff-moderation", "🛠️ Modération", ButtonStyle.Danger),
-      ),
-    ],
-  };
-}
-
-function staffModerationPanel(): { components: ActionRowBuilder<ButtonBuilder>[] } {
-  return {
-    components: [
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        button("staff-delete-team", "🗑️ Supprimer une Team", ButtonStyle.Danger),
-        button("staff-delete-member", "👤 Exclure un Membre", ButtonStyle.Danger),
-        button("staff-delete-tournament", "💥 Supprimer le Tournoi", ButtonStyle.Danger),
-      ),
-    ],
-  };
-}
-
-function scorePanel(): { components: ActionRowBuilder<ButtonBuilder>[] } {
-  return {
-    components: [
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        button("score-enter", "✏️ Saisir un score", ButtonStyle.Primary),
-        button("score-my-matches", "📋 Mes matchs", ButtonStyle.Secondary),
-      ),
-    ],
-  };
-}
-
-function teamManagementPanel(team: Team): { content: string; components: ActionRowBuilder<ButtonBuilder>[] } {
-  return {
-    content: `Gestion de la team **${team.name} [${team.tag}]**\nCapitaine: <@${team.captainId}>\nMembres: ${team.memberIds.map(id => `<@${id}>`).join(", ")}`,
-    components: [
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        button(`team-manage-add:${team.id}`, "➕ Ajouter un membre", ButtonStyle.Primary),
-        button(`team-manage-remove:${team.id}`, "➖ Retirer un membre", ButtonStyle.Secondary),
-        button(`team-manage-voice:${team.id}`, "🔊 Créer un voc", ButtonStyle.Secondary),
-        button(`team-manage-delete:${team.id}`, "🗑️ Supprimer ma team", ButtonStyle.Danger),
-      ),
-    ],
-  };
-}
-
-function teamCreationModal(): ModalBuilder {
-  const modal = new ModalBuilder()
-    .setCustomId("team-create-modal")
-    .setTitle("Création d'équipe");
-
-  const nameInput = new TextInputBuilder()
-    .setCustomId("team-name")
-    .setLabel("Nom de l'équipe")
-    .setStyle(TextInputStyle.Short)
-    .setRequired(true);
-
-  const tagInput = new TextInputBuilder()
-    .setCustomId("team-tag")
-    .setLabel("Tag de l'équipe (ex: ABC)")
-    .setStyle(TextInputStyle.Short)
-    .setMaxLength(5)
-    .setRequired(true);
-
-  modal.addComponents(
-    new ActionRowBuilder<TextInputBuilder>().addComponents(nameInput),
-    new ActionRowBuilder<TextInputBuilder>().addComponents(tagInput),
-  );
-
-  return modal;
-}
-
-async function safeReply(
-  interaction: ReplyableInteraction,
-  options: InteractionReplyOptions,
-): Promise<void> {
-  if (interaction.replied || interaction.deferred) {
-    await interaction.followUp(options);
-  } else {
-    await interaction.reply(options);
-  }
-                                }
-                                                                                
+  
