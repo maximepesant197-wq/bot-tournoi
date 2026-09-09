@@ -267,6 +267,9 @@ export class PanelController {
       case "staff-finish-confirm":
         await this.finish(interaction);
         return;
+      case "team-delete-cancel":
+        await interaction.update({ content: "Suppression de la team annulée.", components: [] });
+        return;
       case "staff-cancel":
         await interaction.update({ content: "Action annulée.", components: [] });
         return;
@@ -307,7 +310,6 @@ export class PanelController {
     await interaction.deferReply();
 
     try {
-      // Fix sharp + dynamic size for 16/32/64 teams
       const buffer = await renderBracketImage(state);
       const attachment = new AttachmentBuilder(buffer, { name: `bracket-${Date.now()}.png` });
       
@@ -324,7 +326,6 @@ export class PanelController {
     } catch (error) {
       this.logger.error({ err: error }, "Bracket image failed - fallback to SVG");
       try {
-        // Fallback SVG si sharp pas installé
         const svg = buildBracketSvg(state);
         const attachment = new AttachmentBuilder(Buffer.from(svg), { name: "bracket.svg" });
         await interaction.editReply({
@@ -366,7 +367,6 @@ export class PanelController {
       return safeReply(interaction, { content: "Tu ne peux pas confirmer ton propre score.", ephemeral: true });
     }
 
-    // Vérifie que c'est bien le capitaine adverse
     const proposerIsA = match.proposedBy === teamA.captainId;
     const proposerIsB = match.proposedBy === teamB.captainId;
     
@@ -390,18 +390,9 @@ export class PanelController {
         m.winnerId = result.winnerId;
         m.loserId = result.loserId;
         m.status = "completed";
-        // On propage le gagnant/perdant
-        if (result.winnerId) {
-          const next = Object.values(current.matches).find(n => 
-            (n.bracket ?? "winners") === (m.bracket ?? "winners") && 
-            n.round === m.round + 1 &&
-            (!n.teamAId || !n.teamBId)
-          );
-        }
       }
     });
 
-    // Avance le bracket
     await this.store.mutateGuild(guild.id, (current) => {
       activateAvailableMatches(current);
     });
@@ -410,7 +401,6 @@ export class PanelController {
       content: `✅ Score confirmé! Vainqueur: **${state.teams[result.winnerId!]?.name ?? result.winnerId}**\nMatch ${matchId} terminé.`, 
     });
 
-    // Optionnel: renvoyer le bracket mis à jour
     try {
       const updatedState = this.store.getGuild(guild.id);
       const buffer = await renderBracketImage(updatedState);
@@ -418,8 +408,6 @@ export class PanelController {
       await interaction.followUp({ files: [attachment] });
     } catch {}
   }
-
-  // ==================== REST OF ORIGINAL LOGIC (KEEP YOUR DESIGN) ====================
 
   private async replyMyMatch(interaction: ButtonInteraction | ChatInputCommandInteraction): Promise<void> {
     const guild = interaction.guild;
@@ -475,9 +463,6 @@ export class PanelController {
     });
   }
 
-  // --- Keep all your other original methods below (createTeam, etc.) ---
-  // Pour ne pas casser ton code, je garde les stubs - colle le reste de ton fichier original ici
-
   private async openMyTeamManagement(interaction: ButtonInteraction): Promise<void> {
     const guild = interaction.guild;
     if (!guild) return;
@@ -488,46 +473,76 @@ export class PanelController {
   }
 
   private async openMyTeamDeletion(interaction: ButtonInteraction): Promise<void> {
-    return this.openMyTeamManagement(interaction);
-  }
+    const guild = interaction.guild;
+    if (!guild) return;
 
-  private async showMemberPicker(interaction: ButtonInteraction, teamId: string, action: string): Promise<void> {
+    const state = this.store.getGuild(guild.id);
+    const myTeam = Object.values(state.teams).find(t => t.captainId === userId(interaction));
+
+    if (!myTeam) {
+      return safeReply(interaction, {
+        content: "Tu n'es capitaine d'aucune team.",
+        ephemeral: true,
+      });
+    }
+
     await safeReply(interaction, {
-      content: "Sélectionne les joueurs à ajouter :",
+      content: `⚠️ **Supprimer la team ${myTeam.name} [${myTeam.tag}] ?**\n\nCette action supprimera **tous les salons de la catégorie**, les salons vocaux, le rôle de la team, la catégorie et les données liées à la team (matchs, check-in et classement).\n\n**Cette action est irréversible.**`,
       components: [
-        new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(
-          new UserSelectMenuBuilder().setCustomId(`${action}:${teamId}`).setPlaceholder("Joueurs").setMinValues(1).setMaxValues(10),
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          button(`team-delete-confirm:${myTeam.id}`, "🗑️ Confirmer la suppression", ButtonStyle.Danger),
+          button("team-delete-cancel", "Annuler", ButtonStyle.Secondary),
         ),
       ],
       ephemeral: true,
     });
   }
 
-  private async showRemoveMemberPicker(interaction: ButtonInteraction, teamId: string): Promise<void> {
+  private async confirmTeamDeletion(interaction: ButtonInteraction, teamId: string): Promise<void> {
     const guild = interaction.guild;
     if (!guild) return;
+
     const state = this.store.getGuild(guild.id);
     const team = state.teams[teamId];
-    if (!team) return;
-    const options = team.memberIds.map(id => ({ label: id, value: id }));
-    const select = new StringSelectMenuBuilder().setCustomId(`team-remove-members:${teamId}`).setPlaceholder("Retirer").addOptions(options.slice(0,25));
-    await safeReply(interaction, { components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)], ephemeral: true });
-  }
+    if (!team) {
+      return safeReply(interaction, { content: "Team introuvable ou déjà supprimée.", ephemeral: true });
+    }
 
-  private async showStaffTeamDeletePicker(interaction: ButtonInteraction): Promise<void> {
-    const state = this.store.getGuild(interaction.guild!.id);
-    const select = new StringSelectMenuBuilder().setCustomId("staff-delete-team-select").setPlaceholder("Team à supprimer").addOptions(
-      Object.values(state.teams).slice(0,25).map(t => ({ label: `${t.name} [${t.tag}]`, value: t.id }))
-    );
-    await safeReply(interaction, { components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)], ephemeral: true });
-  }
+    if (!canManageTeam(interaction, team, this.config)) {
+      return safeReply(interaction, { content: "Seul le capitaine de la team ou le Staff peut la supprimer.", ephemeral: true });
+    }
 
-  private async confirmTournamentDeletion(interaction: ButtonInteraction): Promise<void> {
     await safeReply(interaction, {
-      content: "Supprimer TOUT le tournoi ? Irréversible !",
-      components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
-        button("staff-delete-tournament-confirm", "🗑️ Confirmer suppression", ButtonStyle.Danger),
-        button("staff-cancel", "Annuler", ButtonStyle.Secondary),
-      )],
+      content: `⚠️ **Dernière confirmation : supprimer ${team.name} [${team.tag}] ?**\n\nTous les salons de la catégorie, le rôle, la catégorie et les données de tournoi liées seront supprimés.`,
+      components: [
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          button(`team-delete-confirm:${team.id}`, "🗑️ Confirmer la suppression", ButtonStyle.Danger),
+          button("team-delete-cancel", "Annuler", ButtonStyle.Secondary),
+        ),
+      ],
       ephemeral: true,
-   
+    });
+  }
+
+  private async deleteTeam(interaction: ButtonInteraction, teamId?: string): Promise<void> {
+    const guild = interaction.guild;
+    if (!guild) return;
+
+    const state = this.store.getGuild(guild.id);
+    const id = teamId;
+    if (!id) {
+      return safeReply(interaction, { content: "Team introuvable.", ephemeral: true });
+    }
+
+    const team = state.teams[id];
+    if (!team) {
+      return safeReply(interaction, { content: "Team introuvable ou déjà supprimée.", ephemeral: true });
+    }
+
+    if (!canManageTeam(interaction, team, this.config)) {
+      return safeReply(interaction, { content: "Seul le capitaine de la team ou le Staff peut la supprimer.", ephemeral: true });
+    }
+
+    await interaction.reply(options);
+  }
+}
