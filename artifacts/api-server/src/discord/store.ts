@@ -25,10 +25,11 @@ export class TournamentStore {
 
   public async init(): Promise<void> {
     const rows = await db
-     .select()
-     .from(tournamentStateTable)
-     .where(eq(tournamentStateTable.id, 1))
-     .limit(1);
+      .select()
+      .from(tournamentStateTable)
+      .where(eq(tournamentStateTable.id, 1))
+      .limit(1);
+
     const saved = rows[0]?.data;
     if (isState(saved)) {
       this.state = saved;
@@ -80,73 +81,66 @@ export class TournamentStore {
 
   public async persist(): Promise<void> {
     await db
-     .insert(tournamentStateTable)
-     .values({ id: 1, data: this.state })
-     .onConflictDoUpdate({
+      .insert(tournamentStateTable)
+      .values({ id: 1, data: this.state })
+      .onConflictDoUpdate({
         target: tournamentStateTable.id,
         set: { data: this.state, updatedAt: new Date() },
       });
   }
 
   // ==================== FIX 1 : SUPPRESSION TOTALE TEAM ====================
-  // Avant : tu supprimais seulement le role et la catégorie Discord
-  // Les salons ma-team / check-in / tournoi restaient orphelins
-  // Maintenant : on supprime tout + on nettoie le state tournoi
   public async deleteTeamFully(guildId: string, teamId: string): Promise<void> {
-    await this.mutateGuild(guildId, async (guild) => {
-      // Supprime la team du state
+    await this.mutateGuild(guildId, (guild) => {
+      // Supprime la team
       if (guild.teams) {
         delete guild.teams[teamId];
       }
 
-      // Supprime les matchs liés à cette team
-      for (const matchId of Object.keys(guild.matches)) {
-        const match = guild.matches[matchId];
-        if (match.teamAId === teamId || match.teamBId === teamId) {
-          delete guild.matches[matchId];
-        }
+      // Supprime l'inscription associée
+      if (guild.registrations) {
+        delete guild.registrations[teamId];
       }
 
-      // Supprime du check-in
-      if (guild.checkedTeams) {
-        guild.checkedTeams = guild.checkedTeams.filter(id => id!== teamId);
+      // Nettoie la team des matchs (passage à undefined si présente)
+      for (const matchId of Object.keys(guild.matches)) {
+        const match = guild.matches[matchId];
+        if (match.teamAId === teamId) match.teamAId = undefined;
+        if (match.teamBId === teamId) match.teamBId = undefined;
       }
 
       // Nettoie le ranking
-      guild.finalRanking = guild.finalRanking.filter(id => id!== teamId);
+      if (guild.finalRanking) {
+        guild.finalRanking = guild.finalRanking.filter((id) => id !== teamId);
+      }
     });
   }
 
-  // ==================== FIX 2 : CHECK-IN QUI MELANGE LES JOUEURS ====================
-  // Avant : quand une team adverse s'inscrivait, tu mettais tous les joueurs dans le check-in
-  // Fix : on isole par teamId
-  public async setCheckIn(guildId: string, teamId: string, checked: boolean) {
+  // ==================== FIX 2 : CHECK-IN PAR JOUEUR / TEAM ====================
+  public async setCheckIn(guildId: string, teamId: string, playerId: string, checked: boolean) {
     return this.mutateGuild(guildId, (guild) => {
-      if (!guild.checkedTeams) guild.checkedTeams = [];
+      const reg = guild.registrations?.[teamId];
+      if (!reg) return null;
 
-      if (checked) {
-        // Ajoute seulement cette team, pas les adverses
-        if (!guild.checkedTeams.includes(teamId)) {
-          guild.checkedTeams.push(teamId);
-        }
-      } else {
-        guild.checkedTeams = guild.checkedTeams.filter(id => id!== teamId);
-      }
-      return guild.checkedTeams;
+      if (!reg.checkIn) reg.checkIn = {};
+      reg.checkIn[playerId] = checked;
+
+      return reg.checkIn;
     });
   }
 
   public getCheckInForTeam(guildId: string, teamId: string) {
     const guild = this.getGuild(guildId);
     const team = guild.teams?.[teamId];
+    const reg = guild.registrations?.[teamId];
+
     if (!team) return null;
 
-    // Retourne UNIQUEMENT les joueurs de cette team, pas les joueurs d'en face
     return {
       teamId: team.id,
       teamName: team.name,
-      players: team.players || [], // Seulement ses joueurs, pas tous
-      checkedIn: guild.checkedTeams?.includes(teamId) || false
+      players: team.memberIds || [],
+      checkInStatus: reg?.checkIn || {},
     };
   }
-}
+                                        }
