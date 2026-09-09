@@ -16,11 +16,12 @@ interface Rect {
 }
 
 export async function renderBracketImage(state: GuildTournamentState): Promise<Buffer> {
-  return renderSvgToPng(buildBracketSvg(state));
+  const svg = buildBracketSvg(state);
+  return await sharp(Buffer.from(svg)).png().toBuffer();
 }
 
-function buildBracketSvg(state: GuildTournamentState): string {
-  const matches = Object.values(state.matches).filter(m => {
+export function buildBracketSvg(state: GuildTournamentState): string {
+  const matches = Object.values(state.matches).filter((m) => {
     // Ne pas afficher les matchs vides Bye vs Bye
     if (!m.teamAId && !m.teamBId && !m.winnerId && m.bracket === "winners" && m.round === 1) return false;
     return true;
@@ -145,21 +146,23 @@ function sectionTitle(x: number, y: number, width: number, title: string, subtit
 }
 
 function stageLabels(rounds: Map<number, Match[]>, lane: "winners" | "losers"): string {
-  return [...rounds.keys()].map((round, index) => {
-    const x = 40 + index * COLUMN_STEP;
-    const color = lane === "winners" ? "#2563eb" : "#dc2626";
-    
-    let label = `TOUR ${round}`;
-    if (round === 1) label = "1/8 FINALE";
-    else if (round === 2) label = "1/4 FINALE";
-    else if (round === 3) label = "DEMI-FINALE";
-    else if (round === 4) label = "FINALE";
+  return [...rounds.keys()]
+    .map((round, index) => {
+      const x = 40 + index * COLUMN_STEP;
+      const color = lane === "winners" ? "#2563eb" : "#dc2626";
 
-    return `<g>
+      let label = `TOUR ${round}`;
+      if (round === 1) label = "1/8 FINALE";
+      else if (round === 2) label = "1/4 FINALE";
+      else if (round === 3) label = "DEMI-FINALE";
+      else if (round === 4) label = "FINALE";
+
+      return `<g>
       <rect x="${x}" y="${lane === "winners" ? 142 : 668}" width="${CARD_WIDTH}" height="24" rx="4" fill="${color}" fill-opacity="0.82"/>
       <text x="${x + CARD_WIDTH / 2}" y="${lane === "winners" ? 159 : 685}" text-anchor="middle" fill="#fff" font-family="Arial, sans-serif" font-size="13" font-weight="700">${label} (${lane === "winners" ? "GAGNANTS" : "PERDANTS"})</text>
     </g>`;
-  }).join("");
+    })
+    .join("");
 }
 
 function roundGroups(matches: Match[]): Map<number, Match[]> {
@@ -200,7 +203,15 @@ function matchCard(state: GuildTournamentState, match: Match, position: Rect, la
   </g>`;
 }
 
-function teamRow(state: GuildTournamentState, teamId: string | undefined, score: number | undefined, x: number, y: number, color: string, width: number): string {
+function teamRow(
+  state: GuildTournamentState,
+  teamId: string | undefined,
+  score: number | undefined,
+  x: number,
+  y: number,
+  color: string,
+  width: number
+): string {
   const label = truncate(teamId ? teamLabel(state, teamId) : "À DÉTERMINER", 25);
   const scoreText = score === undefined ? "—" : String(score);
   return `<text x="${x}" y="${y}" fill="#f8fafc" font-family="Arial, sans-serif" font-size="12">${xmlText(label)}</text>
@@ -293,8 +304,4 @@ function xmlText(value: string): string {
 
 function matchOrder(left: Match, right: Match): number {
   return left.round - right.round || left.position - right.position;
-}
-
-async function renderSvgToPng(svg: string): Promise<Buffer> {
-  return await sharp(Buffer.from(svg)).png().toBuffer();
-}
+                                                                    }
