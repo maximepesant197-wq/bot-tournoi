@@ -65,6 +65,7 @@ export interface Match {
   scoreA?: number;
   scoreB?: number;
   proposedBy?: string;
+  proposedByTeamId?: string; // FIX: stocke l'équipe qui propose
   proposedScoreA?: number;
   proposedScoreB?: number;
   submittedAt?: string;
@@ -100,7 +101,7 @@ export interface GuildTournamentState {
   disputes?: Record<string, Dispute>;
   finalRanking?: string[];
   winnerId?: string;
-  bracketVersion?: number;
+  bracketVersion: number;
 }
 
 // Alias de rétrocompatibilité pour le Store et le Panel
